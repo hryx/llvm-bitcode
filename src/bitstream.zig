@@ -121,7 +121,7 @@ pub fn Reader(comptime ReaderType: type) type {
         }
 
         pub fn skipWords(self: *Self, count: u32) !void {
-            try self.skipBits(count * 32);
+            try self.skipBits(@as(usize, count) * 32);
         }
     };
 }

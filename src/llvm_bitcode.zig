@@ -1,6 +1,7 @@
 //! Handles reading and writing LLVM bitcode files.
 
 const std = @import("std");
+const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
@@ -32,6 +33,7 @@ pub const BlockId = enum(std.meta.Tag(bitstream.BlockId)) {
 };
 
 pub const Bitcode = struct {
+    // TODO: Make non-optional, track when found in parse ctx
     identification: ?Idendification = null,
     module: ?Module = null,
     symtab: ?Symtab = null,
@@ -43,17 +45,33 @@ pub const Bitcode = struct {
     };
 
     pub const Module = struct {
-        version: u0, // TODO
-        type: Type,
-        param_attr_group: ParamAttrGroup,
-        param_attr: ParamAttr,
-        triple: []const u8,
-        data_layout: []const u8,
-        source_filename: []const u8,
-        global_var: []const u8, // TODO ?
-        function: []const u8, // TODO ?
-        vst_offset: void, // TODO ?
-        constants: Constants,
+        version: u2 = undefined,
+        type: Type = undefined,
+        param_attr_group: ParamAttrGroup = undefined,
+        param_attr: ParamAttr = undefined,
+        triple: []const u8 = undefined,
+        data_layout: []const u8 = undefined,
+        source_filename: []const u8 = undefined,
+        global_var: []const u8 = undefined,
+        function: []const u8 = undefined,
+        vst_offset: void = {},
+        constants: Constants = undefined,
+
+        pub const Code = enum(u32) {
+            MODULE_CODE_VERSION = 1,
+            MODULE_CODE_TRIPLE,
+            MODULE_CODE_DATALAYOUT,
+            MODULE_CODE_ASM,
+            MODULE_CODE_SECTIONNAME,
+            MODULE_CODE_DEPLIB,
+            MODULE_CODE_GLOBALVAR,
+            MODULE_CODE_FUNCTION,
+            MODULE_CODE_ALIAS,
+
+            MODULE_CODE_GCNAME = 11,
+
+            _,
+        };
 
         pub const Type = struct {
             // TODO
@@ -94,9 +112,11 @@ pub const ParseResult = union(enum) {
     failure: Error,
 
     pub const Error = union(enum) {
+        @"TODO: better error",
         @"bad magic",
         @"expected ENTER_SUBBLOCK",
         @"unknown block ID",
+        @"duplicate module block",
         @"duplicate identification block",
     };
 };
@@ -143,33 +163,29 @@ pub fn Parser(comptime ReaderType: type) type {
                     return ParseResult{ .failure = .@"expected ENTER_SUBBLOCK" };
                 }
 
-                const header = try self.bitstream_reader.readSubBlockHeader();
-                self.abbrev_id_width = header.new_abbr_id_width;
-                std.log.info("got header block: {any}", .{header});
-                switch (header.id) {
-                    .BLOCKINFO => {
-                        @panic("TODO: BLOCKINFO");
-                    },
-                    _ => {
-                        if (try self.parseSubBlock(header, &bc)) |fail| {
-                            return ParseResult{ .failure = fail };
-                        }
-                    },
+                if (try self.parseSubBlock(&bc)) |fail| {
+                    return ParseResult{ .failure = fail };
                 }
             }
 
             return ParseResult{ .success = bc };
         }
 
-        fn parseSubBlock(self: *Self, header: bitstream.BlockHeader, bc: *Bitcode) !?ParseResult.Error {
-            _ = bc;
+        fn parseSubBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
+            const header = try self.bitstream_reader.readSubBlockHeader();
+            self.abbrev_id_width = header.new_abbr_id_width;
+            std.log.info("got header block: {any}", .{header});
+            switch (header.id) {
+                .BLOCKINFO => {
+                    @panic("TODO: BLOCKINFO");
+                },
+                _ => {},
+            }
+
+            const prev_abbr_width = self.abbrev_id_width;
+            defer self.abbrev_id_width = prev_abbr_width;
             const id = @intToEnum(BlockId, @enumToInt(header.id));
             switch (id) {
-                .MODULE_BLOCK_ID => {
-                    std.log.info("TODO: parse block {s}", .{@tagName(id)});
-                    // _ = try self.parseIdentificationBlock(bc);
-                    try self.bitstream_reader.skipWords(header.word_count);
-                },
                 .PARAMATTR_BLOCK_ID,
                 .PARAMATTR_GROUP_BLOCK_ID,
                 .CONSTANTS_BLOCK_ID,
@@ -192,18 +208,95 @@ pub fn Parser(comptime ReaderType: type) type {
                     std.log.info("TODO: parse block {s}", .{@tagName(id)});
                     try self.bitstream_reader.skipWords(header.word_count);
                 },
+                .MODULE_BLOCK_ID => return self.parseModuleBlock(bc),
                 _ => return ParseResult.Error.@"unknown block ID",
             }
             return null;
         }
 
+        fn parseModuleBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
+            if (bc.module != null) {
+                return ParseResult.Error.@"duplicate module block";
+            }
+            bc.module = .{};
+            while (true) {
+                const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
+                switch (id) {
+                    .END_BLOCK => {
+                        try self.bitstream_reader.alignToWord();
+                        return null;
+                    },
+                    .ENTER_SUBBLOCK => {
+                        if (try self.parseSubBlock(bc)) |fail| {
+                            return fail;
+                        }
+                    },
+                    .DEFINE_ABBREV => {
+                        @panic("TODO: parse define abbrev");
+                    },
+                    .UNABBREV_RECORD => {
+                        const code = try self.bitstream_reader.readVbr(u32, 6);
+                        const length = try self.bitstream_reader.readVbr(u32, 6);
+                        std.log.info("unabbrev: code {} len {}", .{ code, length });
+                        switch (@intToEnum(Bitcode.Module.Code, code)) {
+                            .MODULE_CODE_VERSION => {
+                                if (length != 1) {
+                                    return ParseResult.Error.@"TODO: better error";
+                                }
+                                const op = try self.bitstream_reader.readVbr(u32, 6);
+                                if (op != 2) {
+                                    return ParseResult.Error.@"TODO: better error";
+                                }
+                                bc.module.?.version = @intCast(u2, op);
+                            },
+                            .MODULE_CODE_TRIPLE,
+                            .MODULE_CODE_DATALAYOUT,
+                            .MODULE_CODE_ASM,
+                            .MODULE_CODE_SECTIONNAME,
+                            .MODULE_CODE_DEPLIB,
+                            .MODULE_CODE_GLOBALVAR,
+                            .MODULE_CODE_FUNCTION,
+                            .MODULE_CODE_ALIAS,
+                            .MODULE_CODE_GCNAME,
+                            => |c| {
+                                std.debug.panic("TODO: handle module code {s}", .{@tagName(c)});
+                            },
+                            _ => {
+                                return ParseResult.Error.@"TODO: better error";
+                            },
+                        }
+                    },
+                    _ => {
+                        std.debug.panic("TODO: parse abbrev id {}", .{id});
+                    },
+                }
+            }
+
+            return null;
+        }
+
         fn parseIdentificationBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
-            _ = self;
             if (bc.identification != null) {
                 return ParseResult.Error.@"duplicate identification block";
             }
+            const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
+            _ = id;
             // TODO: bc.identification = x;
             return null;
+        }
+
+        fn parseVbrSlice(self: *Self, comptime T: type, len: u32) ![]T {
+            var list = ArrayList(T).init(self.arena);
+            try list.ensureTotalCapacity(len);
+            var i: u32 = 0;
+            while (i < len) : (i += 1) {
+                const op = try self.bitstream_reader.readVbr(u32, 6);
+                if (op > std.math.maxInt(T)) {
+                    return error.TODO;
+                }
+                list.appendAssumeCapacity(@intCast(T, op));
+            }
+            return list.toOwnedSlice();
         }
     };
 }

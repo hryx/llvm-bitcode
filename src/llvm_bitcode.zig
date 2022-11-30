@@ -6,106 +6,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const bitstream = @import("bitstream.zig");
-
-pub const magic = [4]u8{ 'B', 'C', 0xc0, 0xde };
-
-pub const BlockId = enum(std.meta.Tag(bitstream.BlockId)) {
-    MODULE_BLOCK_ID = bitstream.BlockId.first_application_block_id,
-    PARAMATTR_BLOCK_ID,
-    PARAMATTR_GROUP_BLOCK_ID,
-    CONSTANTS_BLOCK_ID,
-    FUNCTION_BLOCK_ID,
-    IDENTIFICATION_BLOCK_ID,
-    VALUE_SYMTAB_BLOCK_ID,
-    METADATA_BLOCK_ID,
-    METADATA_ATTACHMENT_ID,
-    TYPE_BLOCK_ID_NEW,
-    USELIST_BLOCK_ID,
-    MODULE_STRTAB_BLOCK_ID,
-    GLOBALVAL_SUMMARY_BLOCK_ID,
-    OPERAND_BUNDLE_TAGS_BLOCK_ID,
-    METADATA_KIND_BLOCK_ID,
-    STRTAB_BLOCK_ID,
-    FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
-    SYMTAB_BLOCK_ID,
-    SYNC_SCOPE_NAMES_BLOCK_ID,
-    _,
-};
-
-pub const Bitcode = struct {
-    // TODO: Make non-optional, track when found in parse ctx
-    identification: ?Idendification = null,
-    module: ?Module = null,
-    symtab: ?Symtab = null,
-    strtab: ?Strtab = null,
-
-    pub const Idendification = struct {
-        identification: []const u8,
-        epoch: u0, // TODO
-    };
-
-    pub const Module = struct {
-        version: u2 = undefined,
-        type: Type = undefined,
-        param_attr_group: ParamAttrGroup = undefined,
-        param_attr: ParamAttr = undefined,
-        triple: []const u8 = undefined,
-        data_layout: []const u8 = undefined,
-        source_filename: []const u8 = undefined,
-        global_var: []const u8 = undefined,
-        function: []const u8 = undefined,
-        vst_offset: void = {},
-        constants: Constants = undefined,
-
-        pub const Code = enum(u32) {
-            MODULE_CODE_VERSION = 1,
-            MODULE_CODE_TRIPLE,
-            MODULE_CODE_DATALAYOUT,
-            MODULE_CODE_ASM,
-            MODULE_CODE_SECTIONNAME,
-            MODULE_CODE_DEPLIB,
-            MODULE_CODE_GLOBALVAR,
-            MODULE_CODE_FUNCTION,
-            MODULE_CODE_ALIAS,
-
-            MODULE_CODE_GCNAME = 11,
-
-            _,
-        };
-
-        pub const Type = struct {
-            // TODO
-        };
-
-        pub const ParamAttrGroup = struct {
-            // TODO
-        };
-
-        pub const ParamAttr = struct {
-            // TODO
-        };
-
-        pub const Constants = struct {
-            // TODO
-        };
-
-        pub const MetadataKind = struct {
-            // TODO
-        };
-
-        pub const Metadata = struct {
-            // TODO
-        };
-    };
-
-    pub const Symtab = struct {
-        // TODO
-    };
-
-    pub const Strtab = struct {
-        // TODO
-    };
-};
+const Bitcode = @import("Bitcode.zig");
 
 pub const ParseResult = union(enum) {
     success: Bitcode,
@@ -126,6 +27,8 @@ pub fn Parser(comptime ReaderType: type) type {
         arena: ArenaAllocator,
         bitstream_reader: bitstream.Reader(ReaderType),
         abbrev_id_width: u32,
+        found_identification: bool,
+        found_module: bool,
 
         const Self = @This();
 
@@ -134,6 +37,8 @@ pub fn Parser(comptime ReaderType: type) type {
                 .arena = ArenaAllocator.init(gpa),
                 .bitstream_reader = bitstream.reader(reader),
                 .abbrev_id_width = 2,
+                .found_identification = false,
+                .found_module = false,
             };
         }
 
@@ -143,11 +48,16 @@ pub fn Parser(comptime ReaderType: type) type {
 
         pub fn parse(self: *Self) !ParseResult {
             const file_magic = try self.bitstream_reader.readMagic();
-            if (!std.mem.eql(u8, &file_magic, &magic)) {
+            if (!std.mem.eql(u8, &file_magic, &Bitcode.magic)) {
                 return ParseResult{ .failure = .@"bad magic" };
             }
 
-            var bc = Bitcode{};
+            var bc = Bitcode{
+                .identification = undefined,
+                .module = undefined,
+                .symtab = undefined,
+                .strtab = undefined,
+            };
 
             blocks: while (true) {
                 const abbrev_id = self.bitstream_reader.readAbbreviationId(2) catch |err| switch (err) {
@@ -184,7 +94,7 @@ pub fn Parser(comptime ReaderType: type) type {
 
             const prev_abbr_width = self.abbrev_id_width;
             defer self.abbrev_id_width = prev_abbr_width;
-            const id = @intToEnum(BlockId, @enumToInt(header.id));
+            const id = @intToEnum(Bitcode.BlockId, @enumToInt(header.id));
             switch (id) {
                 .PARAMATTR_BLOCK_ID,
                 .PARAMATTR_GROUP_BLOCK_ID,
@@ -215,10 +125,10 @@ pub fn Parser(comptime ReaderType: type) type {
         }
 
         fn parseModuleBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
-            if (bc.module != null) {
+            if (self.found_module) {
                 return ParseResult.Error.@"duplicate module block";
             }
-            bc.module = .{};
+            self.found_module = true;
             while (true) {
                 const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
                 switch (id) {
@@ -247,7 +157,7 @@ pub fn Parser(comptime ReaderType: type) type {
                                 if (op != 2) {
                                     return ParseResult.Error.@"TODO: better error";
                                 }
-                                bc.module.?.version = @intCast(u2, op);
+                                bc.module.version = @intCast(u2, op);
                             },
                             .MODULE_CODE_TRIPLE,
                             .MODULE_CODE_DATALAYOUT,
@@ -276,11 +186,13 @@ pub fn Parser(comptime ReaderType: type) type {
         }
 
         fn parseIdentificationBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
-            if (bc.identification != null) {
+            if (self.found_identification) {
                 return ParseResult.Error.@"duplicate identification block";
             }
+            self.found_identification = true;
             const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
             _ = id;
+            _ = bc;
             // TODO: bc.identification = x;
             return null;
         }
@@ -319,4 +231,5 @@ pub fn dump(gpa: Allocator, r: anytype) !void {
 
 test {
     _ = bitstream;
+    _ = Bitcode;
 }

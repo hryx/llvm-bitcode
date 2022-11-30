@@ -8,7 +8,7 @@ const bitstream = @import("bitstream.zig");
 
 pub const magic = [4]u8{ 'B', 'C', 0xc0, 0xde };
 
-pub const BlockId = enum(u16) {
+pub const BlockId = enum(std.meta.Tag(bitstream.BlockId)) {
     MODULE_BLOCK_ID = bitstream.BlockId.first_application_block_id,
     PARAMATTR_BLOCK_ID,
     PARAMATTR_GROUP_BLOCK_ID,
@@ -32,10 +32,10 @@ pub const BlockId = enum(u16) {
 };
 
 pub const Bitcode = struct {
-    identification: Idendification,
-    module: Module,
-    symtab: Symtab,
-    strtab: Strtab,
+    identification: ?Idendification = null,
+    module: ?Module = null,
+    symtab: ?Symtab = null,
+    strtab: ?Strtab = null,
 
     pub const Idendification = struct {
         identification: []const u8,
@@ -90,12 +90,13 @@ pub const Bitcode = struct {
 };
 
 pub const ParseResult = union(enum) {
-    success: *Bitcode,
+    success: Bitcode,
     failure: Error,
 
     pub const Error = union(enum) {
         @"bad magic",
         @"expected ENTER_SUBBLOCK",
+        @"duplicate identification block",
     };
 };
 
@@ -128,14 +129,45 @@ pub fn Parser(comptime ReaderType: type) type {
                 return ParseResult{ .failure = .@"expected ENTER_SUBBLOCK" };
             }
 
-            const block_id = try self.readBlockId();
-            _ = block_id;
+            var bc = Bitcode{};
 
-            return ParseResult{ .success = undefined };
+            const header = try self.bitstream_reader.readSubBlockHeader();
+            std.log.info("got header block: {any}", .{header});
+            switch (header.id) {
+                .BLOCKINFO => {
+                    std.log.info("TODO: BLOCKINFO", .{});
+                },
+                _ => {
+                    if (try self.parseSubBlock(header, &bc)) |fail| {
+                        return ParseResult{ .failure = fail };
+                    }
+                },
+            }
+
+            return ParseResult{ .success = bc };
         }
 
         fn readBlockId(self: *Self) !BlockId {
             return @intToEnum(BlockId, try self.bitstream_reader.readBlockId(std.meta.Tag(BlockId)));
+        }
+
+        fn parseSubBlock(self: *Self, header: bitstream.BlockHeader, bc: *Bitcode) !?ParseResult.Error {
+            const id = @intToEnum(BlockId, @enumToInt(header.id));
+            switch (id) {
+                .MODULE_BLOCK_ID => {
+                    if (bc.identification != null) {
+                        return ParseResult.Error.@"duplicate identification block";
+                    }
+                    bc.identification = try self.parseIdentificationBlock();
+                },
+                else => std.log.info("TODO: parse block {s}", .{@tagName(id)}),
+            }
+            return null;
+        }
+
+        fn parseIdentificationBlock(self: *Self) !Bitcode.Idendification {
+            _ = self;
+            return undefined;
         }
     };
 }

@@ -96,6 +96,7 @@ pub const ParseResult = union(enum) {
     pub const Error = union(enum) {
         @"bad magic",
         @"expected ENTER_SUBBLOCK",
+        @"unknown block ID",
         @"duplicate identification block",
     };
 };
@@ -126,52 +127,83 @@ pub fn Parser(comptime ReaderType: type) type {
                 return ParseResult{ .failure = .@"bad magic" };
             }
 
-            const abbrev_id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
-            if (abbrev_id != .ENTER_SUBBLOCK) {
-                return ParseResult{ .failure = .@"expected ENTER_SUBBLOCK" };
-            }
-
             var bc = Bitcode{};
 
-            const header = try self.bitstream_reader.readSubBlockHeader();
-            self.abbrev_id_width = header.new_abbr_id_width;
-            std.log.info("got header block: {any}", .{header});
-            switch (header.id) {
-                .BLOCKINFO => {
-                    std.log.info("TODO: BLOCKINFO", .{});
-                },
-                _ => {
-                    if (try self.parseSubBlock(header, &bc)) |fail| {
-                        return ParseResult{ .failure = fail };
-                    }
-                },
+            blocks: while (true) {
+                const abbrev_id = self.bitstream_reader.readAbbreviationId(2) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        if (self.bitstream_reader.pos % 32 != 0) {
+                            return err;
+                        }
+                        break :blocks;
+                    },
+                    else => return err,
+                };
+                if (abbrev_id != .ENTER_SUBBLOCK) {
+                    return ParseResult{ .failure = .@"expected ENTER_SUBBLOCK" };
+                }
+
+                const header = try self.bitstream_reader.readSubBlockHeader();
+                self.abbrev_id_width = header.new_abbr_id_width;
+                std.log.info("got header block: {any}", .{header});
+                switch (header.id) {
+                    .BLOCKINFO => {
+                        @panic("TODO: BLOCKINFO");
+                    },
+                    _ => {
+                        if (try self.parseSubBlock(header, &bc)) |fail| {
+                            return ParseResult{ .failure = fail };
+                        }
+                    },
+                }
             }
 
             return ParseResult{ .success = bc };
         }
 
-        fn readBlockId(self: *Self) !BlockId {
-            return @intToEnum(BlockId, try self.bitstream_reader.readBlockId(std.meta.Tag(BlockId)));
-        }
-
         fn parseSubBlock(self: *Self, header: bitstream.BlockHeader, bc: *Bitcode) !?ParseResult.Error {
+            _ = bc;
             const id = @intToEnum(BlockId, @enumToInt(header.id));
             switch (id) {
                 .MODULE_BLOCK_ID => {
-                    if (bc.identification != null) {
-                        return ParseResult.Error.@"duplicate identification block";
-                    }
-                    bc.identification = try self.parseIdentificationBlock(bc);
+                    std.log.info("TODO: parse block {s}", .{@tagName(id)});
+                    // _ = try self.parseIdentificationBlock(bc);
+                    try self.bitstream_reader.skipWords(header.word_count);
                 },
-                else => std.log.info("TODO: parse block {s}", .{@tagName(id)}),
+                .PARAMATTR_BLOCK_ID,
+                .PARAMATTR_GROUP_BLOCK_ID,
+                .CONSTANTS_BLOCK_ID,
+                .FUNCTION_BLOCK_ID,
+                .IDENTIFICATION_BLOCK_ID,
+                .VALUE_SYMTAB_BLOCK_ID,
+                .METADATA_BLOCK_ID,
+                .METADATA_ATTACHMENT_ID,
+                .TYPE_BLOCK_ID_NEW,
+                .USELIST_BLOCK_ID,
+                .MODULE_STRTAB_BLOCK_ID,
+                .GLOBALVAL_SUMMARY_BLOCK_ID,
+                .OPERAND_BUNDLE_TAGS_BLOCK_ID,
+                .METADATA_KIND_BLOCK_ID,
+                .STRTAB_BLOCK_ID,
+                .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
+                .SYMTAB_BLOCK_ID,
+                .SYNC_SCOPE_NAMES_BLOCK_ID,
+                => {
+                    std.log.info("TODO: parse block {s}", .{@tagName(id)});
+                    try self.bitstream_reader.skipWords(header.word_count);
+                },
+                _ => return ParseResult.Error.@"unknown block ID",
             }
             return null;
         }
 
-        fn parseIdentificationBlock(self: *Self, bc: *Bitcode) !Bitcode.Idendification {
+        fn parseIdentificationBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
             _ = self;
-            _ = bc;
-            return undefined;
+            if (bc.identification != null) {
+                return ParseResult.Error.@"duplicate identification block";
+            }
+            // TODO: bc.identification = x;
+            return null;
         }
     };
 }

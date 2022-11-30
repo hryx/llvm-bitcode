@@ -30,7 +30,6 @@ pub const BlockHeader = struct {
 pub fn Reader(comptime ReaderType: type) type {
     return struct {
         bit_reader: BitReaderType,
-        abbrev_id_width: u32, // TODO have caller track it
         /// How many bits have been read so far.
         pos: usize,
 
@@ -40,7 +39,6 @@ pub fn Reader(comptime ReaderType: type) type {
         pub fn init(unberlying_reader: ReaderType) Self {
             return Self{
                 .bit_reader = io.bitReader(.Little, unberlying_reader),
-                .abbrev_id_width = 2,
                 .pos = 0,
             };
         }
@@ -49,10 +47,10 @@ pub fn Reader(comptime ReaderType: type) type {
         /// `T` must be an unsigned integer type.
         /// `width` is the number of bits in the value's encoding, which is application-specific.
         pub fn readVbr(self: *Self, comptime T: type, width: u32) !T {
-            const Log2T = std.meta.Int(.unsigned, std.math.log2(@typeInfo(T).Int.bits));
+            const ShiftT = std.math.Log2Int(T);
 
             var val: T = 0;
-            var i: Log2T = 0;
+            var i: ShiftT = 0;
             var more = true;
 
             while (more) : (i += 1) {
@@ -65,28 +63,31 @@ pub fn Reader(comptime ReaderType: type) type {
             return val;
         }
 
+        /// Read a fixed-sized integer. T must be no larger than 32 bits.
         pub fn readInt(self: *Self, comptime T: type) !T {
             const bits = @typeInfo(T).Int.bits;
-            return self.bit_reader.readBitsNoEof(T, bits);
+            assert(bits <= 32);
+            const val = try self.bit_reader.readBitsNoEof(T, bits);
+            self.pos += bits;
+            return val;
         }
 
         /// Read the "magic" header at the start of a bitstream.
         /// This must be the first read function called on a bitstream.
         pub fn readMagic(self: *Self) ![4]u8 {
             var buf: [4]u8 = undefined;
-            self.pos += try self.bit_reader.reader().readAll(&buf);
+            self.pos += try self.bit_reader.reader().readAll(&buf) * 8;
             return buf;
         }
 
-        pub fn readAbbreviationId(self: *Self) !AbbreviationId {
-            const id = try self.bit_reader.readBitsNoEof(u32, self.abbrev_id_width);
-            self.pos += self.abbrev_id_width;
+        /// Read an abbreviation with the given VBR width (bit size).
+        /// Caller must keep track of the ID width for the given block scope,
+        /// which is determined by the block's header.
+        /// For the outermost scope, always use an abbeviation width of 2.
+        pub fn readAbbreviationId(self: *Self, width: u32) !AbbreviationId {
+            const id = try self.bit_reader.readBitsNoEof(u32, width);
+            self.pos += width;
             return @intToEnum(AbbreviationId, id);
-        }
-
-        pub fn readBlockId(self: *Self, comptime T: type) !T {
-            const id = self.readVbr(T, 8);
-            return id;
         }
 
         pub fn readSubBlockHeader(self: *Self) !BlockHeader {
@@ -112,7 +113,6 @@ pub fn Reader(comptime ReaderType: type) type {
         }
 
         pub fn skipBits(self: *Self, bits: usize) !void {
-            assert(bits != 0);
             const skip_bytes = bits / 8;
             try self.bit_reader.reader().skipBytes(skip_bytes, .{});
             const diff = @intCast(u3, bits % 8);
@@ -150,16 +150,22 @@ test "skip bits" {
     try testing.expectEqual(@as(usize, 0), r.pos);
     try r.alignToWord();
     try testing.expectEqual(@as(usize, 0), r.pos);
+
     try r.skipBits(1);
     try testing.expectEqual(@as(usize, 1), r.pos);
     try r.skipBits(6);
     try testing.expectEqual(@as(usize, 7), r.pos);
+    try r.skipBits(0);
+    try testing.expectEqual(@as(usize, 7), r.pos);
     try r.alignToWord();
     try testing.expectEqual(@as(usize, 32), r.pos);
     try r.alignToWord();
+
     try testing.expectEqual(@as(usize, 32), r.pos);
     try r.skipBits(9);
     try testing.expectEqual(@as(usize, 41), r.pos);
     try r.skipWords(2);
     try testing.expectEqual(@as(usize, 105), r.pos);
+    try r.alignToWord();
+    try testing.expectEqual(@as(usize, 128), r.pos);
 }

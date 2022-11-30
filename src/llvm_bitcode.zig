@@ -104,6 +104,7 @@ pub fn Parser(comptime ReaderType: type) type {
     return struct {
         arena: ArenaAllocator,
         bitstream_reader: bitstream.Reader(ReaderType),
+        abbrev_id_width: u32,
 
         const Self = @This();
 
@@ -111,6 +112,7 @@ pub fn Parser(comptime ReaderType: type) type {
             return Self{
                 .arena = ArenaAllocator.init(gpa),
                 .bitstream_reader = bitstream.reader(reader),
+                .abbrev_id_width = 2,
             };
         }
 
@@ -124,7 +126,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 return ParseResult{ .failure = .@"bad magic" };
             }
 
-            const abbrev_id = try self.bitstream_reader.readAbbreviationId();
+            const abbrev_id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
             if (abbrev_id != .ENTER_SUBBLOCK) {
                 return ParseResult{ .failure = .@"expected ENTER_SUBBLOCK" };
             }
@@ -132,6 +134,7 @@ pub fn Parser(comptime ReaderType: type) type {
             var bc = Bitcode{};
 
             const header = try self.bitstream_reader.readSubBlockHeader();
+            self.abbrev_id_width = header.new_abbr_id_width;
             std.log.info("got header block: {any}", .{header});
             switch (header.id) {
                 .BLOCKINFO => {
@@ -158,15 +161,16 @@ pub fn Parser(comptime ReaderType: type) type {
                     if (bc.identification != null) {
                         return ParseResult.Error.@"duplicate identification block";
                     }
-                    bc.identification = try self.parseIdentificationBlock();
+                    bc.identification = try self.parseIdentificationBlock(bc);
                 },
                 else => std.log.info("TODO: parse block {s}", .{@tagName(id)}),
             }
             return null;
         }
 
-        fn parseIdentificationBlock(self: *Self) !Bitcode.Idendification {
+        fn parseIdentificationBlock(self: *Self, bc: *Bitcode) !Bitcode.Idendification {
             _ = self;
+            _ = bc;
             return undefined;
         }
     };

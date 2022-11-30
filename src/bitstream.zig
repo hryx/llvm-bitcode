@@ -10,6 +10,8 @@ pub const AbbreviationId = enum(u32) {
     DEFINE_ABBREV,
     UNABBREV_RECORD,
     _,
+
+    pub const first_application_abbrev_id = 4;
 };
 
 /// Standard block IDs
@@ -19,6 +21,17 @@ pub const BlockId = enum(u32) {
 
     /// All application-specific headers must be this value or higher.
     pub const first_application_block_id = 8;
+};
+
+pub const BlockInfoCode = enum(u32) {
+    /// Sets which block ID following records apply to,
+    /// instead of the current block (which is a BLOCKINFO).
+    /// Must be the first record in a BLOCKINFO.
+    BLOCKINFO_CODE_SETBID = 1,
+    BLOCKINFO_CODE_BLOCKNAME,
+    BLOCKINFO_CODE_SETRECORDNAME,
+    /// BLOCKINFO does not allow for application-specific codes.
+    _,
 };
 
 pub const BlockHeader = struct {

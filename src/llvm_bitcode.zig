@@ -12,15 +12,13 @@ pub const ParseResult = union(enum) {
     success: Bitcode,
     failure: Error,
 
-    pub const Error = union(enum) {
-        @"TODO: better error",
-        @"bad magic",
-        @"expected ENTER_SUBBLOCK",
-        @"unknown block ID",
-        @"duplicate module block",
-        @"duplicate identification block",
+    pub const Error = struct {
+        msg: []const u8,
+        pos: usize,
     };
 };
+
+const ParseError = ParseResult.Error;
 
 pub fn Parser(comptime ReaderType: type) type {
     return struct {
@@ -46,10 +44,15 @@ pub fn Parser(comptime ReaderType: type) type {
             self.arena.deinit();
         }
 
+        fn parseError(self: *Self, comptime fmt: []const u8, args: anytype) !ParseError {
+            const msg = try std.fmt.allocPrint(self.arena.allocator(), fmt, args);
+            return ParseError{ .msg = msg, .pos = self.bitstream_reader.pos };
+        }
+
         pub fn parse(self: *Self) !ParseResult {
             const file_magic = try self.bitstream_reader.readMagic();
             if (!std.mem.eql(u8, &file_magic, &Bitcode.magic)) {
-                return ParseResult{ .failure = .@"bad magic" };
+                return ParseResult{ .failure = try self.parseError("bad magic", .{}) };
             }
 
             var bc = Bitcode{
@@ -70,7 +73,7 @@ pub fn Parser(comptime ReaderType: type) type {
                     else => return err,
                 };
                 if (abbrev_id != .ENTER_SUBBLOCK) {
-                    return ParseResult{ .failure = .@"expected ENTER_SUBBLOCK" };
+                    return ParseResult{ .failure = try self.parseError("expected ENTER_SUBBLOCK at top level", .{}) };
                 }
 
                 if (try self.parseSubBlock(&bc)) |fail| {
@@ -81,19 +84,25 @@ pub fn Parser(comptime ReaderType: type) type {
             return ParseResult{ .success = bc };
         }
 
-        fn parseSubBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
+        fn parseSubBlock(self: *Self, bc: *Bitcode) !?ParseError {
             const header = try self.bitstream_reader.readSubBlockHeader();
-            self.abbrev_id_width = header.new_abbr_id_width;
             std.log.info("got header block: {any}", .{header});
+
+            const prev_abbr_width = self.abbrev_id_width;
+            defer self.abbrev_id_width = prev_abbr_width;
+            self.abbrev_id_width = header.new_abbr_id_width;
+
             switch (header.id) {
                 .BLOCKINFO => {
-                    @panic("TODO: BLOCKINFO");
+                    var block_info = BlockInfo{};
+                    if (try self.parseBlockInfo(&block_info)) |fail| {
+                        return fail;
+                    }
+                    std.log.info("blockinfo: {any}", .{block_info});
                 },
                 _ => {},
             }
 
-            const prev_abbr_width = self.abbrev_id_width;
-            defer self.abbrev_id_width = prev_abbr_width;
             const id = @intToEnum(Bitcode.BlockId, @enumToInt(header.id));
             switch (id) {
                 .PARAMATTR_BLOCK_ID,
@@ -119,14 +128,43 @@ pub fn Parser(comptime ReaderType: type) type {
                     try self.bitstream_reader.skipWords(header.word_count);
                 },
                 .MODULE_BLOCK_ID => return self.parseModuleBlock(bc),
-                _ => return ParseResult.Error.@"unknown block ID",
+                _ => return try self.parseError("unknown block ID {}", .{@enumToInt(header.id)}),
             }
             return null;
         }
 
-        fn parseModuleBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
+        const BlockInfo = struct {
+            items: []Item = &.{},
+
+            const Item = struct {
+                id: u32,
+                abbrevs: []void, // TODO
+                name: []const u8,
+                record_names: std.AutoHashMapUnmanaged(u32, []const u8),
+            };
+        };
+
+        fn parseBlockInfo(self: *Self, bi: *BlockInfo) !?ParseError {
+            records: while (true) {
+                const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
+                switch (id) {
+                    .END_BLOCK => return null,
+                    .ENTER_SUBBLOCK => return try self.parseError("found ENTER_SUBBLOCK in BLOCKINFO", .{}),
+                    .DEFINE_ABBREV => {
+                        @panic("TODO: define abbrev in BLOCKINFO");
+                    },
+                    .UNABBREV_RECORD => return try self.parseError("found UNABBREV_RECORD in BLOCKINFO", .{}),
+                    _ => {},
+                }
+                std.debug.panic("TODO: found BLOCKINFO abbrev {}", .{id});
+                if (false) break :records;
+            }
+            _ = bi;
+        }
+
+        fn parseModuleBlock(self: *Self, bc: *Bitcode) !?ParseError {
             if (self.found_module) {
-                return ParseResult.Error.@"duplicate module block";
+                return try self.parseError("duplicate module block", .{});
             }
             self.found_module = true;
             while (true) {
@@ -151,11 +189,11 @@ pub fn Parser(comptime ReaderType: type) type {
                         switch (@intToEnum(Bitcode.Module.Code, code)) {
                             .MODULE_CODE_VERSION => {
                                 if (length != 1) {
-                                    return ParseResult.Error.@"TODO: better error";
+                                    return try self.parseError("MODULE_CODE_VERSION expected one op, got {}", .{length});
                                 }
                                 const op = try self.bitstream_reader.readVbr(u32, 6);
                                 if (op != 2) {
-                                    return ParseResult.Error.@"TODO: better error";
+                                    return try self.parseError("only MODULE_CODE_VERSION 2 is supported, got {}", .{op});
                                 }
                                 bc.module.version = @intCast(u2, op);
                             },
@@ -172,7 +210,7 @@ pub fn Parser(comptime ReaderType: type) type {
                                 std.debug.panic("TODO: handle module code {s}", .{@tagName(c)});
                             },
                             _ => {
-                                return ParseResult.Error.@"TODO: better error";
+                                return try self.parseError("unexpected abbrev code {} in module block", .{code});
                             },
                         }
                     },
@@ -185,9 +223,9 @@ pub fn Parser(comptime ReaderType: type) type {
             return null;
         }
 
-        fn parseIdentificationBlock(self: *Self, bc: *Bitcode) !?ParseResult.Error {
+        fn parseIdentificationBlock(self: *Self, bc: *Bitcode) !?ParseError {
             if (self.found_identification) {
-                return ParseResult.Error.@"duplicate identification block";
+                return try self.parseError("duplicate IDENTIFICATION block", .{});
             }
             self.found_identification = true;
             const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
@@ -198,7 +236,7 @@ pub fn Parser(comptime ReaderType: type) type {
         }
 
         fn parseVbrSlice(self: *Self, comptime T: type, len: u32) ![]T {
-            var list = ArrayList(T).init(self.arena);
+            var list = ArrayList(T).init(self.arena.allocator());
             try list.ensureTotalCapacity(len);
             var i: u32 = 0;
             while (i < len) : (i += 1) {
@@ -223,7 +261,12 @@ pub fn dump(gpa: Allocator, r: anytype) !void {
     switch (res) {
         .success => std.log.info("TODO: dump pared bitcode", .{}),
         .failure => |err| {
-            std.log.err("{s}", .{@tagName(err)});
+            const byte = err.pos / 8;
+            const bit_off = err.pos % 8;
+            std.log.err(
+                "bit {} (0x{x:0>4}+{}): {s}",
+                .{ err.pos, byte, bit_off, err.msg },
+            );
             return error.InvalidBitcode;
         },
     }

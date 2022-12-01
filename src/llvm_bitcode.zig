@@ -99,6 +99,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         return fail;
                     }
                     std.log.info("blockinfo: {any}", .{block_info});
+                    return null;
                 },
                 _ => {},
             }
@@ -172,7 +173,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         // var entry = try blocks.getOrPut(block_id.?);
                         // entry.value_ptr.abbrevs = {};
                         _ = blocks;
-                        @panic("TODO: define abbrev in BLOCKINFO");
+                        // TODO: put values in block_info
                     },
                     .UNABBREV_RECORD => {
                         const code = try self.bitstream_reader.readVbr(u32, 6);
@@ -227,14 +228,18 @@ pub fn Parser(comptime ReaderType: type) type {
                                 if (length != 1) {
                                     return try self.parseError("MODULE_CODE_VERSION expected one op, got {}", .{length});
                                 }
-                                const op = try self.bitstream_reader.readVbr(u32, 6);
-                                if (op != 2) {
-                                    return try self.parseError("only MODULE_CODE_VERSION 2 is supported, got {}", .{op});
+                                const version = try self.bitstream_reader.readVbr(u32, 6);
+                                if (version != 2) {
+                                    return try self.parseError("only MODULE_CODE_VERSION 2 is supported, got {}", .{version});
                                 }
-                                bc.module.version = @intCast(u2, op);
+                                bc.module.version = @intCast(u2, version);
                             },
-                            .MODULE_CODE_TRIPLE,
-                            .MODULE_CODE_DATALAYOUT,
+                            .MODULE_CODE_TRIPLE => {
+                                bc.module.triple = try self.parseVbrSlice(u8, length);
+                            },
+                            .MODULE_CODE_DATALAYOUT => {
+                                bc.module.data_layout = try self.parseVbrSlice(u8, length);
+                            },
                             .MODULE_CODE_ASM,
                             .MODULE_CODE_SECTIONNAME,
                             .MODULE_CODE_DEPLIB,

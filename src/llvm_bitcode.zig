@@ -62,6 +62,14 @@ pub fn Parser(comptime ReaderType: type) type {
         }
 
         pub fn parse(self: *Self) !ParseResult {
+            return self.parseInner() catch |err| switch (err) {
+                error.EndOfStream => ParseResult{ .failure = try self.parseError("unexpected end of bitstream", .{}) },
+                error.InvalidBitstream => ParseResult{ .failure = try self.parseError("invalid bitstream", .{}) },
+                else => err,
+            };
+        }
+
+        fn parseInner(self: *Self) !ParseResult {
             const file_magic = try self.bitstream_reader.readMagic();
             if (!std.mem.eql(u8, &file_magic, &Bitcode.magic)) {
                 return ParseResult{ .failure = try self.parseError("bad magic", .{}) };

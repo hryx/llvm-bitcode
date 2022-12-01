@@ -42,7 +42,6 @@ pub fn main() !void {
         llvm.dump(gpa.allocator(), f.reader()) catch |err| {
             switch (err) {
                 error.InvalidBitcode => try stderr.print("File contains invalid LLVM bitcode\n", .{}),
-                error.EndOfStream => try stderr.print("Unexpected end of bitstream structure\n", .{}),
                 else => return err,
             }
             std.os.exit(1);

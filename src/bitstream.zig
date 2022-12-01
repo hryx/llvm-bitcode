@@ -115,6 +115,10 @@ pub fn Reader(comptime ReaderType: type) type {
             };
         }
 
+        pub fn endBlock(self: *Self) !void {
+            try self.alignToWord();
+        }
+
         /// If the cursor is at a position which is not a multiple of 32,
         /// moves it to the next 32-bit aligned position.
         /// The bitstream format pads information with zeroes up to 32-bit boundaries in some cases.

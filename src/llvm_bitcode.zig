@@ -145,18 +145,41 @@ pub fn Parser(comptime ReaderType: type) type {
         };
 
         fn parseBlockInfo(self: *Self, bi: *BlockInfo) !?ParseError {
+            var block_id: ?u32 = null;
             records: while (true) {
                 const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
+                std.log.info("BLOCKINFO record code {}", .{id});
                 switch (id) {
-                    .END_BLOCK => return null,
+                    .END_BLOCK => {
+                        try self.bitstream_reader.endBlock();
+                        return null;
+                    },
                     .ENTER_SUBBLOCK => return try self.parseError("found ENTER_SUBBLOCK in BLOCKINFO", .{}),
                     .DEFINE_ABBREV => {
+                        if (block_id == null) {
+                            return try self.parseError("found DEFINE_ABBREV before SETBID in BLOCKINFO", .{});
+                        }
                         @panic("TODO: define abbrev in BLOCKINFO");
                     },
-                    .UNABBREV_RECORD => return try self.parseError("found UNABBREV_RECORD in BLOCKINFO", .{}),
-                    _ => {},
+                    .UNABBREV_RECORD => {
+                        const code = try self.bitstream_reader.readVbr(u32, 6);
+                        const length = try self.bitstream_reader.readVbr(u32, 6);
+                        std.log.info("unabbrev: code {} len {}", .{ code, length });
+                        switch (@intToEnum(bitstream.BlockInfoCode, code)) {
+                            .BLOCKINFO_CODE_SETBID => {
+                                if (length != 1) {
+                                    return try self.parseError("expected one arg to SETBID, got {}", .{length});
+                                }
+                                block_id = try self.bitstream_reader.readVbr(u32, 6);
+                                std.log.info("SETBID {}", .{block_id.?});
+                            },
+                            .BLOCKINFO_CODE_BLOCKNAME => @panic("TODO BLOCKNAME"),
+                            .BLOCKINFO_CODE_SETRECORDNAME => @panic("TODO SETRECORDNAME"),
+                            _ => return try self.parseError("unknown BLOCKINFO code {}", .{code}),
+                        }
+                    },
+                    _ => return try self.parseError("unknown abbreviation id {} in BLOCKINFO", .{@enumToInt(id)}),
                 }
-                std.debug.panic("TODO: found BLOCKINFO abbrev {}", .{id});
                 if (false) break :records;
             }
             _ = bi;
@@ -171,7 +194,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
                 switch (id) {
                     .END_BLOCK => {
-                        try self.bitstream_reader.alignToWord();
+                        try self.bitstream_reader.endBlock();
                         return null;
                     },
                     .ENTER_SUBBLOCK => {

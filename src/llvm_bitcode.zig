@@ -145,6 +145,8 @@ pub fn Parser(comptime ReaderType: type) type {
         };
 
         fn parseBlockInfo(self: *Self, bi: *BlockInfo) !?ParseError {
+            var blocks = std.AutoHashMap(u32, BlockInfo.Item).init(self.arena.allocator());
+
             var block_id: ?u32 = null;
             records: while (true) {
                 const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
@@ -159,6 +161,17 @@ pub fn Parser(comptime ReaderType: type) type {
                         if (block_id == null) {
                             return try self.parseError("found DEFINE_ABBREV before SETBID in BLOCKINFO", .{});
                         }
+                        // TODO: unclear whether this is different in BLOCKINFO
+                        const len = try self.bitstream_reader.readVbr(u32, 5);
+                        std.log.info("DEFINE_ABBREV num ops {}", .{len});
+                        var i: u32 = 0;
+                        while (i < len) : (i += 1) {
+                            const op = try self.bitstream_reader.readAbbrevDefOp();
+                            std.log.info("  ABBREV OP: {any}", .{op});
+                        }
+                        // var entry = try blocks.getOrPut(block_id.?);
+                        // entry.value_ptr.abbrevs = {};
+                        _ = blocks;
                         @panic("TODO: define abbrev in BLOCKINFO");
                     },
                     .UNABBREV_RECORD => {

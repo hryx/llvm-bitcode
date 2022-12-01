@@ -40,6 +40,30 @@ pub const BlockHeader = struct {
     word_count: u32,
 };
 
+pub const AbbrevDefOp = union(enum) {
+    literal: u64,
+    encoded: Encoding,
+
+    /// For details of the meaning of these encodings, see:
+    /// https://www.llvm.org/docs/BitCodeFormat.html#define-abbrev-encoding
+    pub const Encoding = union(Tag) {
+        pub const Tag = enum(u3) {
+            fixed = 1,
+            vbr,
+            array,
+            char6,
+            blob,
+            _,
+        };
+
+        fixed: u32,
+        vbr: u32,
+        array,
+        char6,
+        blob,
+    };
+};
+
 pub fn Reader(comptime ReaderType: type) type {
     return struct {
         bit_reader: BitReaderType,
@@ -101,6 +125,22 @@ pub fn Reader(comptime ReaderType: type) type {
             const id = try self.bit_reader.readBitsNoEof(u32, width);
             self.pos += width;
             return @intToEnum(AbbreviationId, id);
+        }
+
+        pub fn readAbbrevDefOp(self: *Self) !AbbrevDefOp {
+            const is_literal = try self.readInt(u1) == 1;
+            if (is_literal) {
+                const value = try self.readVbr(u32, 8);
+                return AbbrevDefOp{ .literal = value };
+            } else {
+                const encoding = @intToEnum(AbbrevDefOp.Encoding.Tag, try self.readInt(u3));
+                switch (encoding) {
+                    .fixed => return AbbrevDefOp{ .encoded = .{ .fixed = try self.readVbr(u32, 5) } },
+                    .vbr => return AbbrevDefOp{ .encoded = .{ .vbr = try self.readVbr(u32, 5) } },
+                    inline .array, .char6, .blob => |enc| return AbbrevDefOp{ .encoded = enc },
+                    _ => return error.InvalidBitstream,
+                }
+            }
         }
 
         pub fn readSubBlockHeader(self: *Self) !BlockHeader {

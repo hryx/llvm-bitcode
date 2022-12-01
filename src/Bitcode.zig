@@ -29,6 +29,8 @@ pub const BlockId = enum(std.meta.Tag(bitstream.BlockId)) {
     SYMTAB_BLOCK_ID,
     SYNC_SCOPE_NAMES_BLOCK_ID,
     _,
+
+    pub const last_known_block_id = @enumToInt(BlockId.SYNC_SCOPE_NAMES_BLOCK_ID);
 };
 
 identification: Idendification,

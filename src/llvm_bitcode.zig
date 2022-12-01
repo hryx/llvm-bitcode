@@ -1,6 +1,7 @@
 //! Handles reading and writing LLVM bitcode files.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -20,14 +21,24 @@ pub const ParseResult = union(enum) {
 
 const ParseError = ParseResult.Error;
 
+const BlockInfo = struct {
+    abbrevs: std.ArrayListUnmanaged(Abbrev) = .{},
+    name: ?[]const u8 = null,
+    record_names: std.AutoHashMapUnmanaged(u32, []const u8) = .{},
+};
+
+const Abbrev = u8; // TODO
+
 pub fn Parser(comptime ReaderType: type) type {
     return struct {
         arena: ArenaAllocator,
         bitstream_reader: bitstream.Reader(ReaderType),
         abbrev_id_width: u32,
+        block_info: [block_info_len]BlockInfo,
         found_identification: bool,
         found_module: bool,
 
+        const block_info_len = Bitcode.BlockId.last_known_block_id + 1;
         const Self = @This();
 
         pub fn init(gpa: Allocator, reader: ReaderType) Self {
@@ -35,6 +46,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 .arena = ArenaAllocator.init(gpa),
                 .bitstream_reader = bitstream.reader(reader),
                 .abbrev_id_width = 2,
+                .block_info = [1]BlockInfo{.{}} ** block_info_len,
                 .found_identification = false,
                 .found_module = false,
             };
@@ -55,12 +67,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 return ParseResult{ .failure = try self.parseError("bad magic", .{}) };
             }
 
-            var bc = Bitcode{
-                .identification = undefined,
-                .module = undefined,
-                .symtab = undefined,
-                .strtab = undefined,
-            };
+            var bc: Bitcode = undefined;
 
             blocks: while (true) {
                 const abbrev_id = self.bitstream_reader.readAbbreviationId(2) catch |err| switch (err) {
@@ -93,14 +100,7 @@ pub fn Parser(comptime ReaderType: type) type {
             self.abbrev_id_width = header.new_abbr_id_width;
 
             switch (header.id) {
-                .BLOCKINFO => {
-                    var block_info = BlockInfo{};
-                    if (try self.parseBlockInfo(&block_info)) |fail| {
-                        return fail;
-                    }
-                    std.log.info("blockinfo: {any}", .{block_info});
-                    return null;
-                },
+                .BLOCKINFO => return try self.parseBlockInfo(),
                 _ => {},
             }
 
@@ -134,22 +134,9 @@ pub fn Parser(comptime ReaderType: type) type {
             return null;
         }
 
-        const BlockInfo = struct {
-            items: []Item = &.{},
-
-            const Item = struct {
-                id: u32,
-                abbrevs: []void, // TODO
-                name: []const u8,
-                record_names: std.AutoHashMapUnmanaged(u32, []const u8),
-            };
-        };
-
-        fn parseBlockInfo(self: *Self, bi: *BlockInfo) !?ParseError {
-            var blocks = std.AutoHashMap(u32, BlockInfo.Item).init(self.arena.allocator());
-
+        fn parseBlockInfo(self: *Self) !?ParseError {
             var block_id: ?Bitcode.BlockId = null;
-            records: while (true) {
+            while (true) {
                 const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
                 std.log.info("BLOCKINFO record code {}", .{id});
                 switch (id) {
@@ -162,19 +149,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         if (block_id == null) {
                             return try self.parseError("found DEFINE_ABBREV before SETBID in BLOCKINFO", .{});
                         }
-                        // TODO: unclear whether this is different in BLOCKINFO
-                        const len = try self.bitstream_reader.readVbr(u32, 5);
-                        std.log.info("DEFINE_ABBREV (blockinfo) num ops {}", .{len});
-                        var i: u32 = 0;
-                        while (i < len) : (i += 1) {
-                            const op = try self.bitstream_reader.readAbbrevDefOp();
-                            std.log.info("  ABBREV OP: {any}", .{op});
-                        }
-                        std.log.info("  TODO: store abbrevs in BLOCKINFO", .{});
-                        // var entry = try blocks.getOrPut(block_id.?);
-                        // entry.value_ptr.abbrevs = {};
-                        _ = blocks;
-                        // TODO: put values in block_info
+                        if (try self.defineAbbrev(block_id.?)) |fail| return fail;
                     },
                     .UNABBREV_RECORD => {
                         const code = try self.bitstream_reader.readVbr(u32, 6);
@@ -195,9 +170,7 @@ pub fn Parser(comptime ReaderType: type) type {
                     },
                     _ => return try self.parseError("unknown abbreviation id {} in BLOCKINFO", .{@enumToInt(id)}),
                 }
-                if (false) break :records;
             }
-            _ = bi;
         }
 
         fn parseModuleBlock(self: *Self, bc: *Bitcode) !?ParseError {
@@ -218,14 +191,9 @@ pub fn Parser(comptime ReaderType: type) type {
                         }
                     },
                     .DEFINE_ABBREV => {
-                        const len = try self.bitstream_reader.readVbr(u32, 5);
-                        std.log.info("DEFINE_ABBREV num ops {}", .{len});
-                        var i: u32 = 0;
-                        while (i < len) : (i += 1) {
-                            const op = try self.bitstream_reader.readAbbrevDefOp();
-                            std.log.info("  ABBREV OP: {any}", .{op});
+                        if (try self.defineAbbrev(.MODULE_BLOCK_ID)) |fail| {
+                            return fail;
                         }
-                        std.log.info("  TODO: store abbrevs", .{});
                     },
                     .UNABBREV_RECORD => {
                         const code = try self.bitstream_reader.readVbr(u32, 6);
@@ -267,7 +235,12 @@ pub fn Parser(comptime ReaderType: type) type {
                         }
                     },
                     _ => {
-                        std.debug.panic("TODO: parse abbrev id {}", .{id});
+                        // Custom defined abbreviation
+                        const abbr_id = @enumToInt(id);
+                        const abbr = self.getAbbrev(.MODULE_BLOCK_ID, abbr_id) orelse {
+                            return try self.parseError("abbrev {} not yet defined for module block", .{abbr_id});
+                        };
+                        std.log.info("TODO: found abbr {}: {c}", .{ abbr_id, abbr });
                     },
                 }
             }
@@ -285,6 +258,35 @@ pub fn Parser(comptime ReaderType: type) type {
             _ = bc;
             // TODO: bc.identification = x;
             return null;
+        }
+
+        fn defineAbbrev(self: *Self, block_id: Bitcode.BlockId) !?ParseError {
+            const index = @enumToInt(block_id);
+            assert(index < block_info_len);
+            const block = &self.block_info[index];
+
+            const arg_count = try self.bitstream_reader.readVbr(u32, 5);
+            std.log.info("DEFINE_ABBREV block {} num ops {}", .{ block_id, arg_count });
+            var i: u32 = 0;
+            while (i < arg_count) : (i += 1) {
+                const op = try self.bitstream_reader.readAbbrevDefOp();
+                std.log.info("  ABBREV OP: {any}", .{op});
+            }
+
+            try block.abbrevs.append(self.arena.allocator(), 'A'); // TODO
+            return null;
+        }
+
+        fn getAbbrev(self: *Self, block_id: Bitcode.BlockId, abbr_id: u32) ?Abbrev {
+            const first_id = bitstream.AbbreviationId.first_application_abbrev_id;
+            assert(abbr_id >= first_id);
+            const adjusted_id = abbr_id - first_id;
+
+            const abbrs = self.block_info[@enumToInt(block_id)].abbrevs.items;
+            if (adjusted_id > abbrs.len) {
+                return null;
+            }
+            return abbrs[adjusted_id];
         }
 
         fn parseUnabbrevOps(self: *Self, comptime T: type, count: u32) ![]T {

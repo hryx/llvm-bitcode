@@ -1,4 +1,4 @@
-//! Handles the bitstream container encoding format used by LLVM bitcode.
+//! Handles the abstract bitstream container encoding format used by LLVM bitcode.
 
 const std = @import("std");
 const io = std.io;

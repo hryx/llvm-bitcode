@@ -164,12 +164,13 @@ pub fn Parser(comptime ReaderType: type) type {
                         }
                         // TODO: unclear whether this is different in BLOCKINFO
                         const len = try self.bitstream_reader.readVbr(u32, 5);
-                        std.log.info("DEFINE_ABBREV num ops {}", .{len});
+                        std.log.info("DEFINE_ABBREV (blockinfo) num ops {}", .{len});
                         var i: u32 = 0;
                         while (i < len) : (i += 1) {
                             const op = try self.bitstream_reader.readAbbrevDefOp();
                             std.log.info("  ABBREV OP: {any}", .{op});
                         }
+                        std.log.info("  TODO: store abbrevs in BLOCKINFO", .{});
                         // var entry = try blocks.getOrPut(block_id.?);
                         // entry.value_ptr.abbrevs = {};
                         _ = blocks;
@@ -217,7 +218,14 @@ pub fn Parser(comptime ReaderType: type) type {
                         }
                     },
                     .DEFINE_ABBREV => {
-                        @panic("TODO: parse define abbrev");
+                        const len = try self.bitstream_reader.readVbr(u32, 5);
+                        std.log.info("DEFINE_ABBREV num ops {}", .{len});
+                        var i: u32 = 0;
+                        while (i < len) : (i += 1) {
+                            const op = try self.bitstream_reader.readAbbrevDefOp();
+                            std.log.info("  ABBREV OP: {any}", .{op});
+                        }
+                        std.log.info("  TODO: store abbrevs", .{});
                     },
                     .UNABBREV_RECORD => {
                         const code = try self.bitstream_reader.readVbr(u32, 6);
@@ -235,10 +243,10 @@ pub fn Parser(comptime ReaderType: type) type {
                                 bc.module.version = @intCast(u2, version);
                             },
                             .MODULE_CODE_TRIPLE => {
-                                bc.module.triple = try self.parseVbrSlice(u8, length);
+                                bc.module.triple = try self.parseVbrSlice(u8, 6, length);
                             },
                             .MODULE_CODE_DATALAYOUT => {
-                                bc.module.data_layout = try self.parseVbrSlice(u8, length);
+                                bc.module.data_layout = try self.parseVbrSlice(u8, 6, length);
                             },
                             .MODULE_CODE_ASM,
                             .MODULE_CODE_SECTIONNAME,
@@ -276,12 +284,12 @@ pub fn Parser(comptime ReaderType: type) type {
             return null;
         }
 
-        fn parseVbrSlice(self: *Self, comptime T: type, len: u32) ![]T {
+        fn parseVbrSlice(self: *Self, comptime T: type, width: u16, count: u32) ![]T {
             var list = ArrayList(T).init(self.arena.allocator());
-            try list.ensureTotalCapacity(len);
+            try list.ensureTotalCapacity(count);
             var i: u32 = 0;
-            while (i < len) : (i += 1) {
-                const op = try self.bitstream_reader.readVbr(u32, 6);
+            while (i < count) : (i += 1) {
+                const op = try self.bitstream_reader.readVbr(u32, width);
                 if (op > std.math.maxInt(T)) {
                     return error.TODO;
                 }

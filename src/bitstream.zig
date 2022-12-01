@@ -83,17 +83,18 @@ pub fn Reader(comptime ReaderType: type) type {
         /// Read a variable bit-width integer (VBR), returning it as a T.
         /// `T` must be an unsigned integer type.
         /// `width` is the number of bits in the value's encoding, which is application-specific.
-        pub fn readVbr(self: *Self, comptime T: type, width: u32) !T {
+        pub fn readVbr(self: *Self, comptime T: type, width: u16) !T {
             const ShiftT = std.math.Log2Int(T);
+            const val_bits = @intCast(ShiftT, width - 1);
 
             var val: T = 0;
-            var i: ShiftT = 0;
+            var shift: ShiftT = 0;
             var more = true;
 
-            while (more) : (i += 1) {
-                const res = try self.bit_reader.readBitsNoEof(T, width - 1);
+            while (more) : (shift += val_bits) {
+                const res = try self.bit_reader.readBitsNoEof(T, val_bits);
                 more = (try self.bit_reader.readBitsNoEof(u1, 1)) == 1;
-                val += @shlExact(res, i);
+                val += @shlExact(res, shift);
                 self.pos += width;
             }
 
@@ -196,6 +197,20 @@ test "magic" {
     var r = reader(fbs.reader());
     const magic = try r.readMagic();
     try testing.expectEqualSlices(u8, data[0..4], &magic);
+}
+
+test "vbr" {
+    const data = [_]u8{ 0b0011_1110, 0b1000_0111, 0b1111_1100 };
+    var fbs = io.fixedBufferStream(&data);
+
+    var r = reader(fbs.reader());
+    try testing.expectEqual(@as(u8, 30), try r.readVbr(u8, 4));
+    try testing.expectEqual(@as(usize, 8), r.pos);
+
+    fbs.reset();
+    r = reader(fbs.reader());
+    try testing.expectEqual(@as(u99, 17214), try r.readVbr(u99, 9));
+    try testing.expectEqual(@as(usize, 18), r.pos);
 }
 
 test "skip bits" {

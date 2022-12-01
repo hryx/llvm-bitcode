@@ -148,7 +148,7 @@ pub fn Parser(comptime ReaderType: type) type {
         fn parseBlockInfo(self: *Self, bi: *BlockInfo) !?ParseError {
             var blocks = std.AutoHashMap(u32, BlockInfo.Item).init(self.arena.allocator());
 
-            var block_id: ?u32 = null;
+            var block_id: ?Bitcode.BlockId = null;
             records: while (true) {
                 const id = try self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
                 std.log.info("BLOCKINFO record code {}", .{id});
@@ -185,7 +185,7 @@ pub fn Parser(comptime ReaderType: type) type {
                                 if (length != 1) {
                                     return try self.parseError("expected one arg to SETBID, got {}", .{length});
                                 }
-                                block_id = try self.bitstream_reader.readVbr(u32, 6);
+                                block_id = @intToEnum(Bitcode.BlockId, try self.bitstream_reader.readVbr(u32, 6));
                                 std.log.info("SETBID {}", .{block_id.?});
                             },
                             .BLOCKINFO_CODE_BLOCKNAME => @panic("TODO BLOCKNAME"),
@@ -243,10 +243,13 @@ pub fn Parser(comptime ReaderType: type) type {
                                 bc.module.version = @intCast(u2, version);
                             },
                             .MODULE_CODE_TRIPLE => {
-                                bc.module.triple = try self.parseVbrSlice(u8, 6, length);
+                                bc.module.triple = try self.parseUnabbrevOps(u8, length);
                             },
                             .MODULE_CODE_DATALAYOUT => {
-                                bc.module.data_layout = try self.parseVbrSlice(u8, 6, length);
+                                bc.module.data_layout = try self.parseUnabbrevOps(u8, length);
+                            },
+                            .MODULE_CODE_SOURCE_FILENAME => {
+                                bc.module.source_filename = try self.parseUnabbrevOps(u8, length);
                             },
                             .MODULE_CODE_ASM,
                             .MODULE_CODE_SECTIONNAME,
@@ -282,6 +285,10 @@ pub fn Parser(comptime ReaderType: type) type {
             _ = bc;
             // TODO: bc.identification = x;
             return null;
+        }
+
+        fn parseUnabbrevOps(self: *Self, comptime T: type, count: u32) ![]T {
+            return self.parseVbrSlice(T, 6, count);
         }
 
         fn parseVbrSlice(self: *Self, comptime T: type, width: u16, count: u32) ![]T {

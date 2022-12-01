@@ -67,6 +67,8 @@ pub const Module = struct {
 
         MODULE_CODE_GCNAME = 11,
 
+        MODULE_CODE_SOURCE_FILENAME = 16,
+
         _,
     };
 

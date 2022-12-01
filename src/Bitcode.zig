@@ -49,7 +49,7 @@ pub const Module = struct {
     triple: []const u8,
     data_layout: []const u8,
     source_filename: []const u8,
-    global_var: []const u8,
+    global_var: GlobalVar,
     function: []const u8,
     vst_offset: void,
     constants: Constants,
@@ -80,6 +80,61 @@ pub const Module = struct {
 
     pub const ParamAttr = struct {
         // TODO
+    };
+
+    pub const GlobalVar = struct {
+        strtab_offset: u32,
+        strtab_size: u32,
+        pointer_type_index: u32,
+        is_const: bool,
+        init_id: ?u32,
+        linkage: enum(u4) {
+            external,
+            weak,
+            appending,
+            internal,
+            link_once,
+            dll_import,
+            dll_export,
+            extern_weak,
+            common,
+            private,
+            weak_odr,
+            link_once_odr,
+            available_externally,
+            deprecated13,
+            deprecated14,
+        },
+        alignment_log2: u16,
+        section_index: ?u32,
+        visibility: ?enum(u2) {
+            default,
+            hidden,
+            protected,
+        },
+        @"threadlocal": ?enum(u3) {
+            no,
+            default_tls_mode,
+            local_dynamic,
+            initial_exec,
+            local_exec,
+        },
+        unnamed_addr: ?enum(u2) {
+            no,
+            unnamed_addr,
+            local_unnamed_addr,
+        },
+        dll_storage_class: ?enum(u2) {
+            default,
+            import,
+            @"export",
+        },
+        comdat: void, // TODO
+        attributes_index: ?u32,
+        preemption_specifier: ?enum(u1) {
+            dso_preemptable,
+            dso_local,
+        },
     };
 
     pub const Constants = struct {

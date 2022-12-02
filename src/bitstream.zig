@@ -56,13 +56,17 @@ pub const AbbrevDefOp = union(enum) {
             _,
         };
 
-        fixed: u32,
-        vbr: u32,
+        fixed: u16,
+        vbr: u16,
         array,
         char6,
         blob,
     };
 };
+
+pub fn decodeChar6(c: u6) u8 {
+    return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[c];
+}
 
 pub fn Reader(comptime ReaderType: type) type {
     return struct {
@@ -101,13 +105,28 @@ pub fn Reader(comptime ReaderType: type) type {
             return val;
         }
 
-        /// Read a fixed-sized integer. T must be no larger than 32 bits.
-        pub fn readInt(self: *Self, comptime T: type) !T {
+        /// Read a fixed-width integer, returning it as a T.
+        pub fn readInt(self: *Self, comptime T: type, width: u16) !T {
+            const val = try self.bit_reader.readBitsNoEof(T, width);
+            self.pos += width;
+            return val;
+        }
+
+        /// Read a fixed-width integer, returning it as a T.
+        /// T must be no larger than 32 bits.
+        /// Width of the fixed field is inferred from T;
+        /// to read an int with a runtime-known width, use `readInt`.
+        pub fn readIntAuto(self: *Self, comptime T: type) !T {
             const bits = @typeInfo(T).Int.bits;
             assert(bits <= 32);
-            const val = try self.bit_reader.readBitsNoEof(T, bits);
-            self.pos += bits;
-            return val;
+            return self.readInt(T, bits);
+        }
+
+        /// Read a 6-bit encoded character, returning it as an ASCII character.
+        pub fn readChar6(self: *Self) !u8 {
+            const val = try self.bit_reader.readBitsNoEof(u6, 6);
+            self.pos += 6;
+            return decodeChar6(val);
         }
 
         /// Read the "magic" header at the start of a bitstream.
@@ -129,15 +148,15 @@ pub fn Reader(comptime ReaderType: type) type {
         }
 
         pub fn readAbbrevDefOp(self: *Self) !AbbrevDefOp {
-            const is_literal = try self.readInt(u1) == 1;
+            const is_literal = try self.readIntAuto(u1) == 1;
             if (is_literal) {
                 const value = try self.readVbr(u32, 8);
                 return AbbrevDefOp{ .literal = value };
             } else {
-                const encoding = @intToEnum(AbbrevDefOp.Encoding.Tag, try self.readInt(u3));
+                const encoding = @intToEnum(AbbrevDefOp.Encoding.Tag, try self.readIntAuto(u3));
                 switch (encoding) {
-                    .fixed => return AbbrevDefOp{ .encoded = .{ .fixed = try self.readVbr(u32, 5) } },
-                    .vbr => return AbbrevDefOp{ .encoded = .{ .vbr = try self.readVbr(u32, 5) } },
+                    .fixed => return AbbrevDefOp{ .encoded = .{ .fixed = try self.readVbr(u16, 5) } },
+                    .vbr => return AbbrevDefOp{ .encoded = .{ .vbr = try self.readVbr(u16, 5) } },
                     inline .array, .char6, .blob => |enc| return AbbrevDefOp{ .encoded = enc },
                     _ => return error.InvalidBitstream,
                 }
@@ -148,7 +167,7 @@ pub fn Reader(comptime ReaderType: type) type {
             const block_id = try self.readVbr(u32, 8);
             const new_abbr_id_width = try self.readVbr(u32, 4);
             try self.alignToWord();
-            const block_words = try self.readInt(u32);
+            const block_words = try self.readIntAuto(u32);
             return BlockHeader{
                 .id = @intToEnum(BlockId, block_id),
                 .new_abbr_id_width = new_abbr_id_width,

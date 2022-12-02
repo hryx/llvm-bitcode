@@ -33,28 +33,28 @@ pub const BlockId = enum(std.meta.Tag(bitstream.BlockId)) {
     pub const last_known_block_id = @enumToInt(BlockId.SYNC_SCOPE_NAMES_BLOCK_ID);
 };
 
-identification: Idendification,
-module: Module,
-symtab: Symtab,
-strtab: Strtab,
+identification: Idendification = .{},
+module: Module = .{},
+symtab: Symtab = .{},
+strtab: Strtab = .{},
 
 pub const Idendification = struct {
-    identification: []const u8,
-    epoch: u0, // TODO
+    identification: []const u8 = "",
+    epoch: u0 = 0, // TODO
 };
 
 pub const Module = struct {
-    version: u2,
-    type: Type,
-    param_attr_group: ParamAttrGroup,
-    param_attr: ParamAttr,
-    triple: []const u8,
-    data_layout: []const u8,
-    source_filename: []const u8,
-    global_var: GlobalVar,
-    function: []const u8,
-    vst_offset: void,
-    constants: Constants,
+    version: u2 = 0,
+    type: Type = .{},
+    param_attr_group: ParamAttrGroup = .{},
+    param_attr: ParamAttr = .{},
+    triple: []const u8 = "",
+    data_layout: []const u8 = "",
+    source_filename: []const u8 = "",
+    global_var: []GlobalVar = &.{},
+    function: []Function = &.{},
+    vst_offset: void = {},
+    constants: Constants = .{},
 
     pub const Code = enum(u32) {
         MODULE_CODE_VERSION = 1,
@@ -92,7 +92,19 @@ pub const Module = struct {
         pointer_type_index: u32,
         is_const: bool,
         init_id: ?u32,
-        linkage: enum(u4) {
+        linkage: Linkage,
+        alignment_log2: u16,
+        section_index: ?u32,
+        visibility: Visibility,
+        @"threadlocal": Threadlocal,
+        unnamed_addr: UnnamedAddr,
+        externally_initialized: bool,
+        dll_storage_class: DllStorageClass,
+        comdat: void, // TODO
+        attributes_index: ?u32,
+        preemption_specifier: PreemptionSpecifier,
+
+        pub const Linkage = enum(u4) {
             external,
             weak,
             appending,
@@ -108,37 +120,79 @@ pub const Module = struct {
             available_externally,
             deprecated13,
             deprecated14,
-        },
-        alignment_log2: u16,
-        section_index: ?u32,
-        visibility: ?enum(u2) {
+        };
+
+        pub const Visibility = enum(u2) {
             default,
             hidden,
             protected,
-        },
-        @"threadlocal": ?enum(u3) {
+        };
+
+        pub const Threadlocal = enum(u3) {
             no,
             default_tls_mode,
             local_dynamic,
             initial_exec,
             local_exec,
-        },
-        unnamed_addr: ?enum(u2) {
+        };
+
+        pub const UnnamedAddr = enum(u2) {
             no,
             unnamed_addr,
             local_unnamed_addr,
-        },
-        dll_storage_class: ?enum(u2) {
+        };
+
+        pub const DllStorageClass = enum(u2) {
             default,
             import,
             @"export",
-        },
-        comdat: void, // TODO
-        attributes_index: ?u32,
-        preemption_specifier: ?enum(u1) {
+        };
+
+        pub const PreemptionSpecifier = enum(u1) {
             dso_preemptable,
             dso_local,
-        },
+        };
+    };
+
+    pub const Function = struct {
+        strtab_offset: u32,
+        strtab_size: u32,
+        type_index: u32,
+        calling_conv: CallingConv,
+        is_proto: bool,
+        linkage: GlobalVar.Linkage,
+        param_attr_index: ?u32,
+        alignment_log2: u16,
+        section_index: ?u32,
+        visibility: GlobalVar.Visibility,
+        gc_index: ?u32,
+        unnamed_addr: GlobalVar.UnnamedAddr,
+        prologue_data_index: ?u32,
+        dll_storage_class: GlobalVar.DllStorageClass,
+        comdat: void, // TODO
+        prefix_index: ?u32,
+        personality_fn_index: ?u32,
+        preemption_specifier: GlobalVar.PreemptionSpecifier,
+
+        pub const CallingConv = enum(u7) {
+            ccc = 0,
+            fastcc = 8,
+            coldcc = 9,
+            webkit_jscc = 12,
+            anyregcc = 13,
+            preserve_mostcc = 14,
+            preserve_allcc = 15,
+            swiftcc = 16,
+            cxx_fast_tlscc = 17,
+            tailcc = 18,
+            cfguard_checkcc = 19,
+            swifttailcc = 20,
+            x86_stdcallcc = 64,
+            x86_fastcallcc = 65,
+            arm_apcscc = 66,
+            arm_aapcscc = 67,
+            arm_aapcs_vfpcc = 68,
+        };
     };
 
     pub const Constants = struct {

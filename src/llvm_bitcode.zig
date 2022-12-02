@@ -78,7 +78,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 return ParseResult{ .failure = try self.parseError("bad magic", .{}) };
             }
 
-            var bc: Bitcode = undefined;
+            var bc: Bitcode = .{};
 
             blocks: while (true) {
                 const abbrev_id = self.readAbbrevId() catch |err| switch (err) {
@@ -230,11 +230,73 @@ pub fn Parser(comptime ReaderType: type) type {
                             .MODULE_CODE_SOURCE_FILENAME => {
                                 bc.module.source_filename = try self.parseUnabbrevOps(u8, length);
                             },
+                            .MODULE_CODE_GLOBALVAR => {
+                                if (length < 16) {
+                                    return try self.parseError("MODULE_CODE_GLOBALVAR expected at least 16 args, got {}", .{length});
+                                }
+                                const G = Bitcode.Module.GlobalVar;
+                                const raw = try self.parseUnabbrevOps(u32, length);
+                                const g = G{
+                                    .strtab_offset = raw[0],
+                                    .strtab_size = raw[1],
+                                    .pointer_type_index = raw[2],
+                                    .is_const = raw[3] != 0,
+                                    .init_id = if (raw[4] == 0) null else raw[4] - 1,
+                                    .linkage = @intToEnum(G.Linkage, raw[5]),
+                                    .alignment_log2 = @intCast(u16, raw[6]),
+                                    .section_index = if (raw[7] == 0) null else raw[7] - 1,
+                                    .visibility = @intToEnum(G.Visibility, raw[8]),
+                                    .@"threadlocal" = @intToEnum(G.Threadlocal, raw[9]),
+                                    .unnamed_addr = @intToEnum(G.UnnamedAddr, raw[10]),
+                                    .externally_initialized = raw[11] != 0,
+                                    .dll_storage_class = @intToEnum(G.DllStorageClass, raw[12]),
+                                    .comdat = {}, // TODO: raw[13]
+                                    .attributes_index = if (raw[14] == 0) null else raw[14] - 1,
+                                    .preemption_specifier = @intToEnum(G.PreemptionSpecifier, raw[15]),
+                                    // undocumented:
+                                    // 16 partition strtab offset
+                                    // 17 partition strtab size
+                                };
+
+                                const len = bc.module.global_var.len;
+                                bc.module.global_var = try self.arena.allocator().realloc(bc.module.global_var, len + 1);
+                                bc.module.global_var[len] = g;
+                            },
+                            .MODULE_CODE_FUNCTION => {
+                                if (length < 17) {
+                                    return try self.parseError("MODULE_CODE_FUNCTION expected at least 17 args, got {}", .{length});
+                                }
+                                const raw = try self.parseUnabbrevOps(u32, length);
+                                const F = Bitcode.Module.Function;
+                                const G = Bitcode.Module.GlobalVar;
+                                const f = F{
+                                    .strtab_offset = raw[0],
+                                    .strtab_size = raw[1],
+                                    .type_index = raw[2],
+                                    .calling_conv = @intToEnum(F.CallingConv, raw[3]),
+                                    .is_proto = raw[4] != 0,
+                                    .linkage = @intToEnum(G.Linkage, raw[5]),
+                                    .param_attr_index = if (raw[6] == 0) null else raw[6] - 1,
+                                    .alignment_log2 = @intCast(u16, raw[7]),
+                                    .section_index = if (raw[8] == 0) null else raw[8] - 1,
+                                    .visibility = @intToEnum(G.Visibility, raw[9]),
+                                    .gc_index = if (raw[10] == 0) null else raw[10] - 1,
+                                    .unnamed_addr = @intToEnum(G.UnnamedAddr, raw[11]),
+                                    .prologue_data_index = if (raw[12] == 0) null else raw[12] - 1,
+                                    .dll_storage_class = @intToEnum(G.DllStorageClass, raw[13]),
+                                    .comdat = {}, // TODO: raw[14]
+                                    .prefix_index = if (raw[15] == 0) null else raw[15] - 1,
+                                    .personality_fn_index = if (raw[16] == 0) null else raw[16] - 1,
+                                    .preemption_specifier = @intToEnum(G.PreemptionSpecifier, raw[17]),
+                                };
+
+                                const len = bc.module.function.len;
+                                bc.module.function = try self.arena.allocator().realloc(bc.module.function, len + 1);
+                                bc.module.function[len] = f;
+                            },
                             .MODULE_CODE_ASM,
                             .MODULE_CODE_SECTIONNAME,
                             .MODULE_CODE_DEPLIB,
-                            .MODULE_CODE_GLOBALVAR,
-                            .MODULE_CODE_FUNCTION,
                             .MODULE_CODE_ALIAS,
                             .MODULE_CODE_GCNAME,
                             => |c| {

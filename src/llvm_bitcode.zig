@@ -635,6 +635,7 @@ pub fn RecordDecoder(comptime Impl: type) type {
 
 pub fn dump(gpa: Allocator, r: anytype) !void {
     var p = parser(gpa, r);
+    defer p.deinit();
     const res = try p.parse();
     switch (res) {
         .success => std.log.info("TODO: dump pared bitcode", .{}),

@@ -107,6 +107,8 @@ pub fn Parser(comptime ReaderType: type) type {
             return self.parseInner() catch |err| switch (err) {
                 error.EndOfStream => ParseResult{ .failure = try self.parseError("unexpected end of bitstream", .{}) },
                 error.InvalidBitstream => ParseResult{ .failure = try self.parseError("invalid bitstream", .{}) },
+                error.EndOfRecord => ParseResult{ .failure = try self.parseError("unexpected end of record", .{}) },
+                error.Overflow => ParseResult{ .failure = try self.parseError("record did not fit into expected type", .{}) },
                 else => err,
             };
         }
@@ -195,6 +197,7 @@ pub fn Parser(comptime ReaderType: type) type {
 
             while (true) {
                 const abbrev_id = try self.readAbbrevId();
+                std.log.info("  record abberev id {}", .{abbrev_id});
                 switch (abbrev_id) {
                     .END_BLOCK => {
                         try self.bitstream_reader.endBlock();
@@ -299,14 +302,15 @@ pub fn Parser(comptime ReaderType: type) type {
 
                 .MODULE_BLOCK_ID => try self.parseModuleRecord(decoder),
             };
+            try decoder.finishOps();
             // Let's change this so parseError stores error msg instead of returning an object
             if (TODO) |xxx| return xxx;
-            try decoder.finishOps();
             return null;
         }
 
         fn parseModuleRecord(self: *Self, decoder: anytype) !?ParseError {
             const code = try decoder.parseRecordCode(Bitcode.Module.Code);
+            std.log.info("    code {}", .{code});
             switch (code) {
                 .MODULE_CODE_GLOBALVAR => {
                     const G = Bitcode.Module.GlobalVar;
@@ -379,8 +383,8 @@ pub fn Parser(comptime ReaderType: type) type {
                 .MODULE_CODE_ALIAS,
                 .MODULE_CODE_GCNAME,
                 .MODULE_CODE_SOURCE_FILENAME,
-                => return try self.parseError("TODO: parse record {s}", .{@tagName(code)}),
-                _ => @panic("TODO: skip record for unknown codes"),
+                => std.log.err("TODO: parse record {s}", .{@tagName(code)}),
+                _ => std.log.err("TODO: unknown code {}", .{code}),
             }
             return null;
         }
@@ -445,7 +449,7 @@ pub fn Parser(comptime ReaderType: type) type {
             index: u32 = 0,
 
             fn readRecordCode(self: *UnabbrevDecoder) !u64 {
-                const code = try self.p.bitstream_reader.readVbr(u32, 6);
+                const code = try self.p.bitstream_reader.readVbr(u64, 6);
                 self.len = try self.p.bitstream_reader.readVbr(u32, 6);
                 return code;
             }
@@ -454,8 +458,8 @@ pub fn Parser(comptime ReaderType: type) type {
                 if (self.index == self.len) {
                     return null;
                 }
-                self.index = 1;
-                return try self.p.bitstream_reader.readVbr(u32, 6);
+                self.index += 1;
+                return try self.p.bitstream_reader.readVbr(u64, 6);
             }
         };
 
@@ -501,7 +505,7 @@ pub fn Parser(comptime ReaderType: type) type {
                     return null;
                 } else {
                     const encoding = self.abbrev.op_encoding[self.index];
-                    self.index = 1;
+                    self.index += 1;
                     return switch (encoding) {
                         .literal => |lit| lit,
                         .encoded => |enc| switch (enc) {
@@ -510,7 +514,7 @@ pub fn Parser(comptime ReaderType: type) type {
                             .char6 => try self.p.bitstream_reader.readChar6(),
                             .array => {
                                 self.remaining_array_elems = try self.p.bitstream_reader.readVbr(u32, 6);
-                                self.index = 1;
+                                self.index += 1;
                                 assert(self.index == self.abbrev.op_encoding.len);
                                 return try self.readOp();
                             },

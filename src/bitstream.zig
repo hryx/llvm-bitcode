@@ -4,6 +4,7 @@ const std = @import("std");
 const io = std.io;
 const assert = std.debug.assert;
 
+// TODO: rename to AbbrevId for consitency
 pub const AbbreviationId = enum(u32) {
     END_BLOCK,
     ENTER_SUBBLOCK,
@@ -68,6 +69,11 @@ pub fn decodeChar6(c: u6) u8 {
     return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[c];
 }
 
+// TODO: use this
+pub const ReadError = error{ EndOfStream, InvalidBitstream };
+
+// TODO: Should read* functions implicitly return u64 instead of taking T: type?
+// The spec does not mention a general max size for fixed ints or VBRs.
 pub fn Reader(comptime ReaderType: type) type {
     return struct {
         bit_reader: BitReaderType,

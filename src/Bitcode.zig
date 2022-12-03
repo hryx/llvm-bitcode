@@ -2,6 +2,7 @@
 //! and constants used in the bitstream encoding.
 
 const std = @import("std");
+const assert = std.debug.assert;
 
 const bitstream = @import("bitstream.zig");
 
@@ -30,7 +31,12 @@ pub const BlockId = enum(std.meta.Tag(bitstream.BlockId)) {
     SYNC_SCOPE_NAMES_BLOCK_ID,
     _,
 
-    pub const last_known_block_id = @enumToInt(BlockId.SYNC_SCOPE_NAMES_BLOCK_ID);
+    pub const last_known_block_id = BlockId.SYNC_SCOPE_NAMES_BLOCK_ID;
+
+    pub fn fromBitstreamBlockId(from: bitstream.BlockId) BlockId {
+        assert(@enumToInt(from) >= bitstream.BlockId.first_application_block_id);
+        return @intToEnum(BlockId, @enumToInt(from));
+    }
 };
 
 identification: Idendification = .{},

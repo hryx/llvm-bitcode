@@ -184,10 +184,12 @@ pub fn Parser(comptime ReaderType: type) type {
                 => {
                     std.log.err("TODO: parse block {s}", .{@tagName(block_id)});
                     try self.bitstream_reader.skipWords(header.word_count);
+                    return null;
                 },
                 _ => {
                     std.log.err("unknown block ID {}", .{header.id});
                     try self.bitstream_reader.skipWords(header.word_count);
+                    return null;
                 },
             }
 
@@ -571,10 +573,12 @@ pub fn RecordDecoder(comptime Impl: type) type {
 
         pub fn parseRecordCode(self: *Self, comptime EnumType: type) !EnumType {
             assert(!self.header_parsed);
+            self.header_parsed = true;
             return intToEnum(EnumType, try self.impl.readRecordCode());
         }
 
         fn mustReadOp(self: *Self) !u64 {
+            assert(self.header_parsed);
             return (try self.impl.readOp()) orelse error.EndOfRecord;
         }
 
@@ -600,11 +604,13 @@ pub fn RecordDecoder(comptime Impl: type) type {
         }
 
         pub fn parseOptionalIndex(self: *Self, comptime T: type) !?T {
+            assert(self.header_parsed);
             const x = try self.parseOp(T);
             return if (x == 0) null else x - 1;
         }
 
         pub fn parseRemainingOpsAsSliceAlloc(self: *Self, comptime T: type, allocator: Allocator) ![]T {
+            assert(self.header_parsed);
             var list = ArrayList(T).init(allocator);
             while (try self.impl.readOp()) |val| {
                 try list.append(try intCast(T, val));
@@ -617,6 +623,7 @@ pub fn RecordDecoder(comptime Impl: type) type {
         }
 
         pub fn finishOps(self: *Self) !void {
+            assert(self.header_parsed);
             while (try self.impl.readOp() != null) {}
         }
     };

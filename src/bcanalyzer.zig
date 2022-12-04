@@ -1,6 +1,7 @@
 const std = @import("std");
 const bitstream = @import("bitstream.zig");
 const llvm = @import("llvm_bitcode.zig");
+const Bitcode = llvm.Bitcode;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -38,14 +39,23 @@ pub fn main() !void {
     const f = try std.fs.cwd().openFile(file_name.?, .{});
     defer f.close();
 
-    if (dump) {
-        llvm.dump(gpa.allocator(), f.reader()) catch |err| {
-            switch (err) {
-                error.InvalidBitcode => try stderr.print("File contains invalid LLVM bitcode\n", .{}),
-                else => return err,
-            }
+    var parser = llvm.parser(gpa.allocator(), f.reader());
+    defer parser.deinit();
+    const res = try parser.parse();
+    switch (res) {
+        .success => |bc| {
+            if (dump) dumpBitcode(std.io.getStdOut().writer(), bc);
+        },
+        .failure => |err| {
+            const byte = err.pos / 8;
+            const bit_off = err.pos % 8;
+            stderr.print(
+                "bit {} (0x{x:0>4}+{}): {s}\n",
+                .{ err.pos, byte, bit_off, err.msg },
+            ) catch unreachable;
+            stderr.print("File contains invalid LLVM bitcode\n", .{}) catch unreachable;
             std.os.exit(1);
-        };
+        },
     }
 }
 
@@ -60,4 +70,8 @@ fn printUsage() void {
         \\    --stats   Print statistics about bitstream container
         \\
     , .{}) catch unreachable;
+}
+
+fn dumpBitcode(w: anytype, bc: Bitcode) void {
+    std.json.stringify(bc, .{}, w) catch unreachable;
 }

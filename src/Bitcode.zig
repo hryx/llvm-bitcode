@@ -67,7 +67,7 @@ pub const Module = struct {
     gc_name: [][]const u8 = &.{},
     global_var: []GlobalVar = &.{},
     function: []Function = &.{},
-    vst_offset: void = {},
+    vst_offset: struct {} = .{},
     constants: Constants = .{},
 
     pub const Code = enum(u32) {
@@ -137,6 +137,8 @@ pub const Module = struct {
                 return_type_index: u32,
                 param_type_indexes: []u32,
             };
+
+            pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
 
         pub const Code = enum(u5) {
@@ -183,6 +185,8 @@ pub const Module = struct {
                 return_value_attributes,
                 function_attributes,
                 function_param_attributes: u32,
+
+                pub const jsonStringify = defaultEnumJsonStringify(@This());
             };
 
             pub const Attr = struct {
@@ -298,7 +302,7 @@ pub const Module = struct {
         unnamed_addr: UnnamedAddr,
         externally_initialized: bool,
         dll_storage_class: DllStorageClass,
-        comdat: void, // TODO
+        comdat: u64, // TODO
         attributes_index: ?u32,
         preemption_specifier: PreemptionSpecifier,
 
@@ -317,6 +321,8 @@ pub const Module = struct {
             link_once_odr,
             available_externally,
             _,
+
+            pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
 
         pub const Visibility = enum(u2) {
@@ -324,6 +330,8 @@ pub const Module = struct {
             hidden,
             protected,
             _,
+
+            pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
 
         pub const Threadlocal = enum(u3) {
@@ -333,6 +341,8 @@ pub const Module = struct {
             initial_exec,
             local_exec,
             _,
+
+            pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
 
         pub const UnnamedAddr = enum(u2) {
@@ -340,6 +350,8 @@ pub const Module = struct {
             unnamed_addr,
             local_unnamed_addr,
             _,
+
+            pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
 
         pub const DllStorageClass = enum(u2) {
@@ -347,11 +359,15 @@ pub const Module = struct {
             import,
             @"export",
             _,
+
+            pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
 
         pub const PreemptionSpecifier = enum(u1) {
             dso_preemptable,
             dso_local,
+
+            pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
     };
 
@@ -370,7 +386,7 @@ pub const Module = struct {
         unnamed_addr: GlobalVar.UnnamedAddr,
         prologue_data_index: ?u32,
         dll_storage_class: GlobalVar.DllStorageClass,
-        comdat: void, // TODO
+        comdat: u64, // TODO
         prefix_index: ?u32,
         personality_fn_index: ?u32,
         preemption_specifier: GlobalVar.PreemptionSpecifier,
@@ -393,6 +409,8 @@ pub const Module = struct {
             arm_apcscc = 66,
             arm_aapcscc = 67,
             arm_aapcs_vfpcc = 68,
+
+            pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
     };
 
@@ -416,3 +434,11 @@ pub const Symtab = struct {
 pub const Strtab = struct {
     // TODO
 };
+
+fn defaultEnumJsonStringify(comptime T: type) fn (T, std.json.StringifyOptions, anytype) anyerror!void {
+    return struct {
+        pub fn stringify(self: T, opts: std.json.StringifyOptions, w: anytype) !void {
+            try std.json.stringify(@tagName(self), opts, w);
+        }
+    }.stringify;
+}

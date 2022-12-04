@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const bitstream = @import("bitstream.zig");
-const Bitcode = @import("Bitcode.zig");
+pub const Bitcode = @import("Bitcode.zig");
 
 pub const ParseResult = union(enum) {
     success: Bitcode,
@@ -353,7 +353,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         .unnamed_addr = try decoder.parseOp(G.UnnamedAddr),
                         .externally_initialized = try decoder.parseOp(bool),
                         .dll_storage_class = try decoder.parseOp(G.DllStorageClass),
-                        .comdat = try decoder.skipOp(), // TODO
+                        .comdat = try decoder.parseOp(u64), // TODO
                         .attributes_index = try decoder.parseOptionalIndex(u32),
                         .preemption_specifier = try decoder.parseOp(G.PreemptionSpecifier),
                         // undocumented:
@@ -380,7 +380,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         .unnamed_addr = try decoder.parseOp(G.UnnamedAddr),
                         .prologue_data_index = try decoder.parseOptionalIndex(u32),
                         .dll_storage_class = try decoder.parseOp(G.DllStorageClass),
-                        .comdat = try decoder.skipOp(), // TODO
+                        .comdat = try decoder.parseOp(u64), // TODO
                         .prefix_index = try decoder.parseOptionalIndex(u32),
                         .personality_fn_index = try decoder.parseOptionalIndex(u32),
                         .preemption_specifier = try decoder.parseOp(G.PreemptionSpecifier),
@@ -789,24 +789,6 @@ pub fn RecordDecoder(comptime Impl: type) type {
             while (try self.impl.readOp() != null) {}
         }
     };
-}
-
-pub fn dump(gpa: Allocator, r: anytype) !void {
-    var p = parser(gpa, r);
-    defer p.deinit();
-    const res = try p.parse();
-    switch (res) {
-        .success => std.log.info("TODO: dump pared bitcode", .{}),
-        .failure => |err| {
-            const byte = err.pos / 8;
-            const bit_off = err.pos % 8;
-            std.log.err(
-                "bit {} (0x{x:0>4}+{}): {s}",
-                .{ err.pos, byte, bit_off, err.msg },
-            );
-            return error.InvalidBitcode;
-        },
-    }
 }
 
 test {

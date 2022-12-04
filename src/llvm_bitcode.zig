@@ -327,6 +327,12 @@ pub fn Parser(comptime ReaderType: type) type {
             return null;
         }
 
+        fn appendOne(self: *Self, comptime T: type, slice: *[]T, val: T) !void {
+            const len = slice.len;
+            slice.* = try self.arena.allocator().realloc(slice.*, len + 1);
+            slice.*[len] = val;
+        }
+
         fn parseModuleRecord(self: *Self, decoder: anytype) !?ParseError {
             const code = try decoder.parseRecordCode(Bitcode.Module.Code);
             std.log.info("    code {}", .{code});
@@ -354,10 +360,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         // 16 partition strtab offset
                         // 17 partition strtab size
                     };
-
-                    const len = self.bc.module.global_var.len;
-                    self.bc.module.global_var = try self.arena.allocator().realloc(self.bc.module.global_var, len + 1);
-                    self.bc.module.global_var[len] = g;
+                    try self.appendOne(G, &self.bc.module.global_var, g);
                 },
                 .MODULE_CODE_FUNCTION => {
                     const F = Bitcode.Module.Function;
@@ -382,27 +385,51 @@ pub fn Parser(comptime ReaderType: type) type {
                         .personality_fn_index = try decoder.parseOptionalIndex(u32),
                         .preemption_specifier = try decoder.parseOp(G.PreemptionSpecifier),
                     };
-
-                    const len = self.bc.module.function.len;
-                    self.bc.module.function = try self.arena.allocator().realloc(self.bc.module.function, len + 1);
-                    self.bc.module.function[len] = f;
+                    try self.appendOne(F, &self.bc.module.function, f);
                 },
                 .MODULE_CODE_VERSION => {
+                    if (self.bc.module.version != 0) {
+                        return try self.parseError("duplicate version in module", .{});
+                    }
                     self.bc.module.version = try decoder.parseOp(u2);
                 },
                 .MODULE_CODE_TRIPLE => {
+                    if (self.bc.module.triple.len != 0) {
+                        return try self.parseError("duplicate triple in module", .{});
+                    }
                     self.bc.module.triple = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
                 },
                 .MODULE_CODE_DATALAYOUT => {
+                    if (self.bc.module.data_layout.len != 0) {
+                        return try self.parseError("duplicate datalayout in module", .{});
+                    }
                     self.bc.module.data_layout = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
                 },
-                .MODULE_CODE_ASM,
-                .MODULE_CODE_SECTIONNAME,
-                .MODULE_CODE_DEPLIB,
-                .MODULE_CODE_ALIAS,
-                .MODULE_CODE_GCNAME,
-                .MODULE_CODE_SOURCE_FILENAME,
-                => std.log.err("TODO: parse module record {s}", .{@tagName(code)}),
+                .MODULE_CODE_SOURCE_FILENAME => {
+                    if (self.bc.module.source_filename.len != 0) {
+                        return try self.parseError("duplicate source filename in module", .{});
+                    }
+                    self.bc.module.source_filename = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
+                },
+                .MODULE_CODE_ASM => {
+                    if (self.bc.module.@"asm".len != 0) {
+                        return try self.parseError("duplicate asm entry in module", .{});
+                    }
+                    self.bc.module.@"asm" = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
+                },
+                .MODULE_CODE_SECTIONNAME => {
+                    const name = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
+                    try self.appendOne([]const u8, &self.bc.module.section_name, name);
+                },
+                .MODULE_CODE_DEPLIB => {
+                    const name = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
+                    try self.appendOne([]const u8, &self.bc.module.deplib, name);
+                },
+                .MODULE_CODE_GCNAME => {
+                    const name = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
+                    try self.appendOne([]const u8, &self.bc.module.gc_name, name);
+                },
+                .MODULE_CODE_ALIAS => std.log.err("TODO: parse module record {s}", .{@tagName(code)}),
                 _ => std.log.err("unknown code {}", .{code}),
             }
             return null;

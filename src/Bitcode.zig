@@ -57,6 +57,14 @@ pub const Module = struct {
     triple: []const u8 = "",
     data_layout: []const u8 = "",
     source_filename: []const u8 = "",
+    // TODO: Encoding uses LF to separate asm blocks.
+    // See how the consumer uses this and if it's useful to split them into separate slices.
+    // Multiple `module asm` blocks are internally concatenated, so there should only be one in a .bc.
+    // https://llvm.org/docs/LangRef.html#module-level-inline-assembly
+    @"asm": []const u8 = "",
+    section_name: [][]const u8 = &.{},
+    deplib: [][]const u8 = &.{},
+    gc_name: [][]const u8 = &.{},
     global_var: []GlobalVar = &.{},
     function: []Function = &.{},
     vst_offset: void = {},
@@ -255,6 +263,7 @@ pub const Module = struct {
                         noundef = 68,
                         byref = 69,
                         mustprogress = 70,
+
                         vscale_range = 74,
                         swiftasync = 75,
                         nosanitize_coverage = 76,

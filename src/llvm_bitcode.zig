@@ -163,6 +163,11 @@ pub fn Parser(comptime ReaderType: type) type {
                     }
                     self.found_module = true;
                 },
+                .TYPE_BLOCK_ID => {
+                    if (!self.found_module) {
+                        return try self.parseError("type block before module block", .{});
+                    }
+                },
 
                 // unhandled, skip
                 .PARAMATTR_BLOCK_ID,
@@ -173,7 +178,6 @@ pub fn Parser(comptime ReaderType: type) type {
                 .VALUE_SYMTAB_BLOCK_ID,
                 .METADATA_BLOCK_ID,
                 .METADATA_ATTACHMENT_ID,
-                .TYPE_BLOCK_ID_NEW,
                 .USELIST_BLOCK_ID,
                 .MODULE_STRTAB_BLOCK_ID,
                 .GLOBALVAL_SUMMARY_BLOCK_ID,
@@ -287,7 +291,6 @@ pub fn Parser(comptime ReaderType: type) type {
                 .VALUE_SYMTAB_BLOCK_ID,
                 .METADATA_BLOCK_ID,
                 .METADATA_ATTACHMENT_ID,
-                .TYPE_BLOCK_ID_NEW,
                 .USELIST_BLOCK_ID,
                 .MODULE_STRTAB_BLOCK_ID,
                 .GLOBALVAL_SUMMARY_BLOCK_ID,
@@ -301,6 +304,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 _ => unreachable,
 
                 .MODULE_BLOCK_ID => try self.parseModuleRecord(decoder),
+                .TYPE_BLOCK_ID => try self.parseTypeRecord(decoder),
             };
             try decoder.finishOps();
             // Let's change this so parseError stores error msg instead of returning an object
@@ -383,8 +387,41 @@ pub fn Parser(comptime ReaderType: type) type {
                 .MODULE_CODE_ALIAS,
                 .MODULE_CODE_GCNAME,
                 .MODULE_CODE_SOURCE_FILENAME,
-                => std.log.err("TODO: parse record {s}", .{@tagName(code)}),
-                _ => std.log.err("TODO: unknown code {}", .{code}),
+                => std.log.err("TODO: parse module record {s}", .{@tagName(code)}),
+                _ => std.log.err("unknown code {}", .{code}),
+            }
+            return null;
+        }
+
+        fn parseTypeRecord(self: *Self, decoder: anytype) !?ParseError {
+            _ = self;
+            const code = try decoder.parseRecordCode(Bitcode.Module.Type.Code);
+            std.log.info("    code {}", .{code});
+            switch (code) {
+                .TYPE_CODE_NUMENTRY,
+                .TYPE_CODE_VOID,
+                .TYPE_CODE_FLOAT,
+                .TYPE_CODE_DOUBLE,
+                .TYPE_CODE_LABEL,
+                .TYPE_CODE_OPAQUE,
+                .TYPE_CODE_INTEGER,
+                .TYPE_CODE_POINTER,
+                .TYPE_CODE_HALF,
+                .TYPE_CODE_ARRAY,
+                .TYPE_CODE_VECTOR,
+                .TYPE_CODE_X86_FP80,
+                .TYPE_CODE_FP128,
+                .TYPE_CODE_PPC_FP128,
+                .TYPE_CODE_METADATA,
+                .TYPE_CODE_X86_MMX,
+                .TYPE_CODE_STRUCT_ANON,
+                .TYPE_CODE_STRUCT_NAME,
+                .TYPE_CODE_STRUCT_NAMED,
+                .TYPE_CODE_FUNCTION,
+                .TYPE_CODE_BFLOAT,
+                .TYPE_CODE_X86_AMX,
+                => std.log.err("TODO: parse type record {s}", .{@tagName(code)}),
+                _ => std.log.err("unknown code {}", .{code}),
             }
             return null;
         }
@@ -563,6 +600,8 @@ pub fn RecordDecoder(comptime Impl: type) type {
         }
 
         /// Returns error.Overflow instead of panicking.
+        /// TODO: If this can fail with an error instead of panicking (@intToEnum),
+        /// lots of enums don't have to be marked non-exhaustive (Linkage, Visibility, etc.).
         fn intToEnum(comptime E: type, i: anytype) !E {
             const Tag = @typeInfo(E).Enum.tag_type;
             const int = try intCast(Tag, i);

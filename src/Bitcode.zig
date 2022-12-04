@@ -88,7 +88,7 @@ pub const Module = struct {
             float,
             double,
             label,
-            @"opaque",
+            @"opaque": Opaque,
             integer: u16, // width
             pointer: Pointer,
             half,
@@ -103,6 +103,10 @@ pub const Module = struct {
             function: Entry.Function,
             bfloat,
             x86_amx,
+
+            pub const Opaque = struct {
+                name: []const u8,
+            };
 
             pub const Pointer = struct {
                 pointee_type_index: u32,

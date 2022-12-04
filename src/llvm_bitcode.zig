@@ -59,6 +59,8 @@ pub fn Parser(comptime ReaderType: type) type {
         block_info: [block_info_len]BlockInfo,
         found_identification: bool,
         found_module: bool,
+        type_entry_count: u32,
+        pending_type_name: ?[]const u8,
 
         const block_info_len = blockInfoIndex(Bitcode.BlockId.last_known_block_id) + 1;
         const Self = @This();
@@ -91,6 +93,8 @@ pub fn Parser(comptime ReaderType: type) type {
                 .block_info = [1]BlockInfo{.{}} ** block_info_len,
                 .found_identification = false,
                 .found_module = false,
+                .type_entry_count = 0,
+                .pending_type_name = null,
             };
         }
 
@@ -136,6 +140,17 @@ pub fn Parser(comptime ReaderType: type) type {
                 if (try self.parseSubBlock()) |fail| {
                     return ParseResult{ .failure = fail };
                 }
+            }
+
+            if (!self.found_module) {
+                return ParseResult{ .failure = try self.parseError("no module block", .{}) };
+            }
+
+            if (self.type_entry_count != self.bc.module.type.entries.len) {
+                return ParseResult{ .failure = try self.parseError(
+                    "expected {} type table entries, found {}",
+                    .{ self.bc.module.type.entries.len, self.type_entry_count },
+                ) };
             }
 
             return ParseResult{ .success = self.bc };
@@ -322,7 +337,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         .strtab_offset = try decoder.parseOp(u32),
                         .strtab_size = try decoder.parseOp(u32),
                         .pointer_type_index = try decoder.parseOp(u32),
-                        .is_const = try decoder.parseOp(u32) != 0,
+                        .is_const = try decoder.parseOp(bool),
                         .init_id = try decoder.parseOptionalIndex(u32),
                         .linkage = try decoder.parseOp(G.Linkage),
                         .alignment_log2 = try decoder.parseOp(u16),
@@ -330,7 +345,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         .visibility = try decoder.parseOp(G.Visibility),
                         .@"threadlocal" = try decoder.parseOp(G.Threadlocal),
                         .unnamed_addr = try decoder.parseOp(G.UnnamedAddr),
-                        .externally_initialized = try decoder.parseOp(u32) != 0,
+                        .externally_initialized = try decoder.parseOp(bool),
                         .dll_storage_class = try decoder.parseOp(G.DllStorageClass),
                         .comdat = try decoder.skipOp(), // TODO
                         .attributes_index = try decoder.parseOptionalIndex(u32),
@@ -352,7 +367,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         .strtab_size = try decoder.parseOp(u32),
                         .type_index = try decoder.parseOp(u32),
                         .calling_conv = try decoder.parseOp(F.CallingConv),
-                        .is_proto = try decoder.parseOp(u32) != 0,
+                        .is_proto = try decoder.parseOp(bool),
                         .linkage = try decoder.parseOp(G.Linkage),
                         .param_attr_index = try decoder.parseOptionalIndex(u32),
                         .alignment_log2 = try decoder.parseOp(u16),
@@ -394,36 +409,110 @@ pub fn Parser(comptime ReaderType: type) type {
         }
 
         fn parseTypeRecord(self: *Self, decoder: anytype) !?ParseError {
-            _ = self;
             const code = try decoder.parseRecordCode(Bitcode.Module.Type.Code);
             std.log.info("    code {}", .{code});
             switch (code) {
-                .TYPE_CODE_NUMENTRY,
-                .TYPE_CODE_VOID,
-                .TYPE_CODE_FLOAT,
-                .TYPE_CODE_DOUBLE,
-                .TYPE_CODE_LABEL,
-                .TYPE_CODE_OPAQUE,
-                .TYPE_CODE_INTEGER,
-                .TYPE_CODE_POINTER,
-                .TYPE_CODE_HALF,
-                .TYPE_CODE_ARRAY,
-                .TYPE_CODE_VECTOR,
-                .TYPE_CODE_X86_FP80,
-                .TYPE_CODE_FP128,
-                .TYPE_CODE_PPC_FP128,
-                .TYPE_CODE_METADATA,
-                .TYPE_CODE_X86_MMX,
-                .TYPE_CODE_STRUCT_ANON,
-                .TYPE_CODE_STRUCT_NAME,
-                .TYPE_CODE_STRUCT_NAMED,
-                .TYPE_CODE_FUNCTION,
-                .TYPE_CODE_BFLOAT,
-                .TYPE_CODE_X86_AMX,
-                => std.log.err("TODO: parse type record {s}", .{@tagName(code)}),
+                .TYPE_CODE_NUMENTRY => {
+                    if (self.bc.module.type.entries.len != 0) {
+                        return try self.parseError("duplicate NUMENTRY for type table", .{});
+                    }
+                    const count = try decoder.parseOp(usize);
+                    self.bc.module.type.entries = try self.arena.allocator().alloc(Bitcode.Module.Type.Entry, count);
+                },
+                .TYPE_CODE_VOID => return try self.appendTypeDefinition(.void),
+                .TYPE_CODE_FLOAT => return try self.appendTypeDefinition(.float),
+                .TYPE_CODE_DOUBLE => return try self.appendTypeDefinition(.double),
+                .TYPE_CODE_LABEL => return try self.appendTypeDefinition(.label),
+                .TYPE_CODE_OPAQUE => return try self.appendTypeDefinitionNamed(.{ .@"opaque" = undefined }),
+                .TYPE_CODE_INTEGER => {
+                    const width = try decoder.parseOp(u16);
+                    return try self.appendTypeDefinition(.{ .integer = width });
+                },
+                .TYPE_CODE_POINTER => {
+                    const t = Bitcode.Module.Type.Entry{ .pointer = .{
+                        .pointee_type_index = try decoder.parseOp(u32),
+                        .address_space = try decoder.parseOp(u16),
+                    } };
+                    return try self.appendTypeDefinition(t);
+                },
+                .TYPE_CODE_HALF => return try self.appendTypeDefinition(.float),
+                .TYPE_CODE_ARRAY => {
+                    return try self.appendTypeDefinition(.{ .array = .{
+                        .element_count = try decoder.parseOp(u64),
+                        .element_type_index = try decoder.parseOp(u32),
+                    } });
+                },
+                .TYPE_CODE_VECTOR => {
+                    return try self.appendTypeDefinition(.{ .vector = .{
+                        .element_count = try decoder.parseOp(u64),
+                        .element_type_index = try decoder.parseOp(u32),
+                    } });
+                },
+                .TYPE_CODE_X86_FP80 => return try self.appendTypeDefinition(.x86_fp80),
+                .TYPE_CODE_FP128 => return try self.appendTypeDefinition(.fp128),
+                .TYPE_CODE_PPC_FP128 => return try self.appendTypeDefinition(.ppc_fp128),
+                .TYPE_CODE_METADATA => return try self.appendTypeDefinition(.metadata),
+                .TYPE_CODE_X86_MMX => return try self.appendTypeDefinition(.x86_mmx),
+                .TYPE_CODE_STRUCT_ANON => {
+                    return try self.appendTypeDefinition(.{ .@"struct" = .{
+                        .name = null,
+                        .is_packed = try decoder.parseOp(bool),
+                        .element_type_indexes = try decoder.parseRemainingOpsAsSliceAlloc(u32, self.arena.allocator()),
+                    } });
+                },
+                .TYPE_CODE_STRUCT_NAME => {
+                    self.pending_type_name = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
+                },
+                .TYPE_CODE_STRUCT_NAMED => {
+                    return try self.appendTypeDefinitionNamed(.{ .@"struct" = .{
+                        .name = undefined,
+                        .is_packed = try decoder.parseOp(bool),
+                        .element_type_indexes = try decoder.parseRemainingOpsAsSliceAlloc(u32, self.arena.allocator()),
+                    } });
+                },
+                .TYPE_CODE_FUNCTION => {
+                    return try self.appendTypeDefinition(.{ .function = .{
+                        .is_vararg = try decoder.parseOp(bool),
+                        .return_type_index = try decoder.parseOp(u32),
+                        .param_type_indexes = try decoder.parseRemainingOpsAsSliceAlloc(u32, self.arena.allocator()),
+                    } });
+                },
+                .TYPE_CODE_BFLOAT => return try self.appendTypeDefinition(.bfloat),
+                .TYPE_CODE_X86_AMX => return try self.appendTypeDefinition(.x86_amx),
                 _ => std.log.err("unknown code {}", .{code}),
             }
             return null;
+        }
+
+        fn appendTypeDefinition(self: *Self, entry: Bitcode.Module.Type.Entry) !?ParseError {
+            if (self.type_entry_count == self.bc.module.type.entries.len) {
+                return try self.parseError("found too many type entries according to NUMENTRY", .{});
+            }
+            self.bc.module.type.entries[self.type_entry_count] = entry;
+            self.type_entry_count += 1;
+            return null;
+        }
+
+        fn appendTypeDefinitionNamed(self: *Self, entry: Bitcode.Module.Type.Entry) !?ParseError {
+            const name = self.pending_type_name orelse
+                return try self.parseError("no pending type name for named {s}", .{@tagName(entry)});
+            defer self.pending_type_name = null;
+
+            switch (entry) {
+                .@"opaque" => {
+                    return try self.appendTypeDefinition(.{ .@"opaque" = .{
+                        .name = name,
+                    } });
+                },
+                .@"struct" => |s| {
+                    return try self.appendTypeDefinition(.{ .@"struct" = .{
+                        .name = name,
+                        .is_packed = s.is_packed,
+                        .element_type_indexes = s.element_type_indexes,
+                    } });
+                },
+                else => unreachable,
+            }
         }
 
         fn readAbbrevId(self: *Self) !bitstream.AbbreviationId {
@@ -636,6 +725,9 @@ pub fn RecordDecoder(comptime Impl: type) type {
                 },
                 .Int => {
                     return intCast(T, try self.mustReadOp());
+                },
+                .Bool => {
+                    return (try self.mustReadOp() != 0);
                 },
                 .Void => {
                     _ = try self.mustReadOp();

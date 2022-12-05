@@ -45,8 +45,14 @@ symtab: Symtab = .{},
 strtab: Strtab = .{},
 
 pub const Idendification = struct {
-    identification: []const u8 = "",
-    epoch: u0 = 0, // TODO
+    string: []const u8 = "",
+    epoch: u0 = 0,
+
+    pub const Code = enum(u2) {
+        IDENTIFICATION_CODE_STRING = 1,
+        IDENTIFICATION_CODE_EPOCH,
+        _,
+    };
 };
 
 pub const Module = struct {

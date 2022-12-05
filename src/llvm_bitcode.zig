@@ -144,6 +144,10 @@ pub fn Parser(comptime ReaderType: type) type {
                 }
             }
 
+            if (!self.found_identification) {
+                return ParseResult{ .failure = try self.parseError("no identification block", .{}) };
+            }
+
             if (!self.found_module) {
                 return ParseResult{ .failure = try self.parseError("no module block", .{}) };
             }
@@ -174,6 +178,12 @@ pub fn Parser(comptime ReaderType: type) type {
             const block_id = Bitcode.BlockId.fromBitstreamBlockId(header.id);
             switch (block_id) {
                 // handled below
+                .IDENTIFICATION_BLOCK_ID => {
+                    if (self.found_identification) {
+                        return try self.parseError("duplicate identification block", .{});
+                    }
+                    self.found_identification = true;
+                },
                 .MODULE_BLOCK_ID => {
                     if (self.found_module) {
                         return try self.parseError("duplicate module block", .{});
@@ -197,7 +207,6 @@ pub fn Parser(comptime ReaderType: type) type {
                 .PARAMATTR_GROUP_BLOCK_ID,
                 .CONSTANTS_BLOCK_ID,
                 .FUNCTION_BLOCK_ID,
-                .IDENTIFICATION_BLOCK_ID,
                 .VALUE_SYMTAB_BLOCK_ID,
                 .METADATA_BLOCK_ID,
                 .METADATA_ATTACHMENT_ID,
@@ -309,7 +318,6 @@ pub fn Parser(comptime ReaderType: type) type {
                 .PARAMATTR_GROUP_BLOCK_ID,
                 .CONSTANTS_BLOCK_ID,
                 .FUNCTION_BLOCK_ID,
-                .IDENTIFICATION_BLOCK_ID,
                 .VALUE_SYMTAB_BLOCK_ID,
                 .METADATA_BLOCK_ID,
                 .METADATA_ATTACHMENT_ID,
@@ -324,6 +332,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 => unreachable,
                 _ => unreachable,
 
+                .IDENTIFICATION_BLOCK_ID => try self.parseIdentificationRecord(decoder),
                 .MODULE_BLOCK_ID => try self.parseModuleRecord(decoder),
                 .TYPE_BLOCK_ID => try self.parseTypeRecord(decoder),
                 .STRTAB_BLOCK_ID => try self.parseStrtabRecord(decoder),
@@ -338,6 +347,21 @@ pub fn Parser(comptime ReaderType: type) type {
             const len = slice.len;
             slice.* = try self.arena.allocator().realloc(slice.*, len + 1);
             slice.*[len] = val;
+        }
+
+        fn parseIdentificationRecord(self: *Self, decoder: anytype) !?ParseError {
+            const code = try decoder.parseRecordCode(Bitcode.Idendification.Code);
+            std.log.info("    code {}", .{code});
+            switch (code) {
+                .IDENTIFICATION_CODE_STRING => {
+                    self.bc.identification.string = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
+                },
+                .IDENTIFICATION_CODE_EPOCH => {
+                    self.bc.identification.epoch = try decoder.parseOp(u0);
+                },
+                _ => std.log.err("unknown code {}", .{code}),
+            }
+            return null;
         }
 
         fn parseModuleRecord(self: *Self, decoder: anytype) !?ParseError {

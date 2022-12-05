@@ -59,6 +59,7 @@ pub fn Parser(comptime ReaderType: type) type {
         block_info: [block_info_len]BlockInfo,
         found_identification: bool,
         found_module: bool,
+        found_strtab: bool,
         type_entry_count: u32,
         pending_type_name: ?[]const u8,
 
@@ -93,6 +94,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 .block_info = [1]BlockInfo{.{}} ** block_info_len,
                 .found_identification = false,
                 .found_module = false,
+                .found_strtab = false,
                 .type_entry_count = 0,
                 .pending_type_name = null,
             };
@@ -134,7 +136,7 @@ pub fn Parser(comptime ReaderType: type) type {
                     else => return err,
                 };
                 if (abbrev_id != .ENTER_SUBBLOCK) {
-                    return ParseResult{ .failure = try self.parseError("expected ENTER_SUBBLOCK at top level", .{}) };
+                    return ParseResult{ .failure = try self.parseError("expected ENTER_SUBBLOCK at top level, got {}", .{abbrev_id}) };
                 }
 
                 if (try self.parseSubBlock()) |fail| {
@@ -183,6 +185,12 @@ pub fn Parser(comptime ReaderType: type) type {
                         return try self.parseError("type block before module block", .{});
                     }
                 },
+                .STRTAB_BLOCK_ID => {
+                    if (self.found_strtab) {
+                        return try self.parseError("duplicate strtab", .{});
+                    }
+                    self.found_strtab = true;
+                },
 
                 // unhandled, skip
                 .PARAMATTR_BLOCK_ID,
@@ -198,7 +206,6 @@ pub fn Parser(comptime ReaderType: type) type {
                 .GLOBALVAL_SUMMARY_BLOCK_ID,
                 .OPERAND_BUNDLE_TAGS_BLOCK_ID,
                 .METADATA_KIND_BLOCK_ID,
-                .STRTAB_BLOCK_ID,
                 .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
                 .SYMTAB_BLOCK_ID,
                 .SYNC_SCOPE_NAMES_BLOCK_ID,
@@ -311,7 +318,6 @@ pub fn Parser(comptime ReaderType: type) type {
                 .GLOBALVAL_SUMMARY_BLOCK_ID,
                 .OPERAND_BUNDLE_TAGS_BLOCK_ID,
                 .METADATA_KIND_BLOCK_ID,
-                .STRTAB_BLOCK_ID,
                 .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
                 .SYMTAB_BLOCK_ID,
                 .SYNC_SCOPE_NAMES_BLOCK_ID,
@@ -320,6 +326,7 @@ pub fn Parser(comptime ReaderType: type) type {
 
                 .MODULE_BLOCK_ID => try self.parseModuleRecord(decoder),
                 .TYPE_BLOCK_ID => try self.parseTypeRecord(decoder),
+                .STRTAB_BLOCK_ID => try self.parseStrtabRecord(decoder),
             };
             try decoder.finishOps();
             // Let's change this so parseError stores error msg instead of returning an object
@@ -542,6 +549,18 @@ pub fn Parser(comptime ReaderType: type) type {
             }
         }
 
+        fn parseStrtabRecord(self: *Self, decoder: anytype) !?ParseError {
+            const code = try decoder.parseRecordCode(Bitcode.Strtab.Code);
+            std.log.info("    code {}", .{code});
+            switch (code) {
+                .STRTAB_BLOB => {
+                    self.bc.strtab.contents = try decoder.parseRemainingOpsAsSliceAlloc(u8, self.arena.allocator());
+                },
+                _ => std.log.err("unknown code {}", .{code}),
+            }
+            return null;
+        }
+
         fn readAbbrevId(self: *Self) !bitstream.AbbreviationId {
             return self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
         }
@@ -559,6 +578,7 @@ pub fn Parser(comptime ReaderType: type) type {
                 .literal => {},
                 .encoded => |enc| switch (enc) {
                     .fixed, .vbr => {},
+                    // TODO: these are invalid bitstream, not invalid bitcode
                     .char6, .array, .blob => return try self.parseError(
                         "abbrev record code must be encoded as literal, fixed, or vbr, but got {s}",
                         .{@tagName(enc)},
@@ -579,11 +599,20 @@ pub fn Parser(comptime ReaderType: type) type {
                 while (i < arg_count) : (i += 1) {
                     const op = try self.bitstream_reader.readAbbrevDefOp();
                     std.log.info("  ABBREV OP: {any}", .{op});
-                    if (op == .encoded and op.encoded == .array) {
-                        if (i + 2 != arg_count) {
-                            return try self.parseError("abbrev def array must be second to last op", .{});
-                        }
-                    }
+                    if (op == .encoded) switch (op.encoded) {
+                        // TODO: these are invalid bitstream, not invalid bitcode
+                        .array => {
+                            if (i + 2 != arg_count) {
+                                return try self.parseError("abbrev def array must be second to last op", .{});
+                            }
+                        },
+                        .blob => {
+                            if (i + 1 != arg_count) {
+                                return try self.parseError("abbrev def blob must be last op", .{});
+                            }
+                        },
+                        else => {},
+                    };
                     ops[i] = op;
                 }
 
@@ -625,10 +654,11 @@ pub fn Parser(comptime ReaderType: type) type {
         const AbbrevDecoder = struct {
             p: *Self,
             abbrev: Abbrev,
-            // When array encoding is found, this is set to ops.len.
-            index: u32 = 0,
-            // When array encoding is found, this is set to parsed array len.
-            remaining_array_elems: u32 = 0,
+            state: union(enum) {
+                default: u32, // op_encoding index
+                array: u32, // remaining elements
+                blob: u32, // remaining bytes
+            } = .{ .default = 0 },
 
             fn readRecordCode(self: *AbbrevDecoder) !u64 {
                 return switch (self.abbrev.id_encoding) {
@@ -642,40 +672,63 @@ pub fn Parser(comptime ReaderType: type) type {
             }
 
             fn readOp(self: *AbbrevDecoder) !?u64 {
-                if (self.remaining_array_elems > 0) {
-                    const encoding = self.abbrev.op_encoding[self.abbrev.op_encoding.len - 1];
-                    self.remaining_array_elems -= 1;
-                    return switch (encoding) {
-                        .literal => |lit| lit,
-                        .encoded => |enc| switch (enc) {
-                            .fixed => |width| try self.p.bitstream_reader.readInt(u64, width),
-                            .vbr => |width| try self.p.bitstream_reader.readVbr(u64, width),
-                            .char6 => try self.p.bitstream_reader.readChar6(),
-                            .array, .blob => unreachable, // rejected during DEFINE_ABBREV
-                        },
-                    };
-                } else if (self.index == self.abbrev.op_encoding.len) {
-                    return null;
-                } else {
-                    const encoding = self.abbrev.op_encoding[self.index];
-                    self.index += 1;
-                    return switch (encoding) {
-                        .literal => |lit| lit,
-                        .encoded => |enc| switch (enc) {
-                            .fixed => |width| try self.p.bitstream_reader.readInt(u64, width),
-                            .vbr => |width| try self.p.bitstream_reader.readVbr(u64, width),
-                            .char6 => try self.p.bitstream_reader.readChar6(),
-                            .array => {
-                                self.remaining_array_elems = try self.p.bitstream_reader.readVbr(u32, 6);
-                                self.index += 1;
-                                assert(self.index == self.abbrev.op_encoding.len);
-                                return try self.readOp();
+                switch (self.state) {
+                    .default => |*index| {
+                        if (index.* == self.abbrev.op_encoding.len) {
+                            return null;
+                        }
+                        const encoding = self.abbrev.op_encoding[index.*];
+                        index.* += 1;
+                        return switch (encoding) {
+                            .literal => |lit| lit,
+                            .encoded => |enc| switch (enc) {
+                                .fixed => |width| try self.p.bitstream_reader.readInt(u64, width),
+                                .vbr => |width| try self.p.bitstream_reader.readVbr(u64, width),
+                                .char6 => try self.p.bitstream_reader.readChar6(),
+                                .array => {
+                                    assert(index.* == self.abbrev.op_encoding.len - 1);
+                                    const elem_count = try self.p.bitstream_reader.readVbr(u32, 6);
+                                    self.state = .{ .array = elem_count };
+                                    std.log.info("GOT A ARRAY, LEN IS {}", .{elem_count});
+                                    return try self.readOp(); // first array value
+                                },
+                                .blob => {
+                                    assert(index.* == self.abbrev.op_encoding.len);
+                                    const byte_count = try self.p.bitstream_reader.readVbr(u32, 6);
+                                    try self.p.bitstream_reader.alignToWord(); // blob contents start aligned
+                                    self.state = .{ .blob = byte_count };
+                                    std.log.info("GOT A BLOB, LEN IS {}", .{byte_count});
+                                    return try self.readOp(); // first byte
+                                },
                             },
-                            .blob => {
-                                @panic("TODO: read encoded blob");
+                        };
+                    },
+                    .array => |*rem| {
+                        if (rem.* == 0) {
+                            std.log.info("  ARRAY DONE", .{});
+                            return null;
+                        }
+                        std.log.info("  ARRAY ELEM, {} left", .{rem.*});
+                        rem.* -= 1;
+                        const elem_encoding = self.abbrev.op_encoding[self.abbrev.op_encoding.len - 1];
+                        return switch (elem_encoding) {
+                            .literal => |lit| lit,
+                            .encoded => |enc| switch (enc) {
+                                .fixed => |width| try self.p.bitstream_reader.readInt(u64, width),
+                                .vbr => |width| try self.p.bitstream_reader.readVbr(u64, width),
+                                .char6 => try self.p.bitstream_reader.readChar6(),
+                                .array, .blob => unreachable, // rejected during DEFINE_ABBREV
                             },
-                        },
-                    };
+                        };
+                    },
+                    .blob => |*rem| {
+                        if (rem.* == 0) {
+                            try self.p.bitstream_reader.alignToWord(); // blob contents padded at end
+                            return null;
+                        }
+                        rem.* -= 1;
+                        return try self.p.bitstream_reader.readIntAuto(u8);
+                    },
                 }
             }
         };

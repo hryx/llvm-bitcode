@@ -432,7 +432,12 @@ pub const Symtab = struct {
 };
 
 pub const Strtab = struct {
-    // TODO
+    contents: []const u8 = "",
+
+    pub const Code = enum(u1) {
+        STRTAB_BLOB = 1,
+        _,
+    };
 };
 
 fn defaultEnumJsonStringify(comptime T: type) fn (T, std.json.StringifyOptions, anytype) anyerror!void {

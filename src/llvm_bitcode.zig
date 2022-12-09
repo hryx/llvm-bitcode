@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const bitstream = @import("bitstream.zig");
+const codes = bitstream.codes;
 pub const Bitcode = @import("Bitcode.zig");
 
 pub const ParseResult = union(enum) {
@@ -28,23 +29,23 @@ const BlockInfo = struct {
 };
 
 const Abbrev = struct {
-    id_encoding: bitstream.AbbrevDefOp,
-    op_encoding: []bitstream.AbbrevDefOp,
+    id_encoding: bitstream.AbbrevOp,
+    op_encoding: []bitstream.AbbrevOp,
 };
 
 /// Convert a Bitcode block ID into an index into the BlockInfo array.
 /// Asserts the block ID is known.
 fn blockInfoIndex(id: Bitcode.BlockId) u32 {
     const idx = @enumToInt(id);
-    assert(idx >= bitstream.BlockId.first_application_block_id);
+    assert(idx >= codes.block.Id.first_application_id);
     assert(idx <= @enumToInt(Bitcode.BlockId.last_known_block_id));
-    return idx - bitstream.BlockId.first_application_block_id;
+    return idx - codes.block.Id.first_application_id;
 }
 
 /// Convert an abbreviation ID to an index in the abbreviation array.
 /// Asserts the ID is not one of the standard/reserved abbreviations.
-fn abbrevIdToIndex(abbr_id: bitstream.AbbreviationId) u32 {
-    const first_id = bitstream.AbbreviationId.first_application_abbrev_id;
+fn abbrevIdToIndex(abbr_id: codes.abbrev.Id) u32 {
+    const first_id = codes.abbrev.Id.first_application_id;
     const int = @enumToInt(abbr_id);
     assert(int >= first_id);
     return int - first_id;
@@ -55,7 +56,7 @@ pub fn Parser(comptime ReaderType: type) type {
         arena: ArenaAllocator,
         bitstream_reader: bitstream.Reader(ReaderType),
         bc: Bitcode,
-        abbrev_id_width: u32,
+        abbrev_id_width: u5,
         block_info: [block_info_len]BlockInfo,
         found_identification: bool,
         found_module: bool,
@@ -76,7 +77,7 @@ pub fn Parser(comptime ReaderType: type) type {
         /// Returns an abbrev encoding previously defined with DEFINE_ABBREV
         /// for the given block, or null if the abbrev ID has not been defined.
         /// Asserts the block ID is a known ID and that the abbrev ID is not a reserved bitcode abbrev.
-        fn getAbbrev(self: *Self, block_id: Bitcode.BlockId, abbr_id: bitstream.AbbreviationId) ?Abbrev {
+        fn getAbbrev(self: *Self, block_id: Bitcode.BlockId, abbr_id: codes.abbrev.Id) ?Abbrev {
             const abbrevs = self.getBlockInfo(block_id).abbrevs.items;
             const index = abbrevIdToIndex(abbr_id);
             if (index >= abbrevs.len) {
@@ -168,7 +169,7 @@ pub fn Parser(comptime ReaderType: type) type {
 
             const prev_abbr_width = self.abbrev_id_width;
             defer self.abbrev_id_width = prev_abbr_width;
-            self.abbrev_id_width = header.new_abbr_id_width;
+            self.abbrev_id_width = header.abbrev_width;
 
             switch (header.id) {
                 .BLOCKINFO => return try self.parseBlockInfo(),
@@ -293,7 +294,7 @@ pub fn Parser(comptime ReaderType: type) type {
                         const code = try self.bitstream_reader.readVbr(u32, 6);
                         const length = try self.bitstream_reader.readVbr(u32, 6);
                         std.log.info("unabbrev: code {} len {}", .{ code, length });
-                        switch (@intToEnum(bitstream.BlockInfoCode, code)) {
+                        switch (@intToEnum(codes.record.block_info.Id, code)) {
                             .BLOCKINFO_CODE_SETBID => {
                                 if (length != 1) {
                                     return try self.parseError("expected one arg to SETBID, got {}", .{length});
@@ -585,8 +586,8 @@ pub fn Parser(comptime ReaderType: type) type {
             return null;
         }
 
-        fn readAbbrevId(self: *Self) !bitstream.AbbreviationId {
-            return self.bitstream_reader.readAbbreviationId(self.abbrev_id_width);
+        fn readAbbrevId(self: *Self) !codes.abbrev.Id {
+            return self.bitstream_reader.readAbbrevId(self.abbrev_id_width);
         }
 
         /// Parse bits during DEFINE_ABBREV, storing the abbreviation in
@@ -597,17 +598,13 @@ pub fn Parser(comptime ReaderType: type) type {
                 return try self.parseError("empty op list in abbrev", .{});
             }
 
-            const id_encoding = try self.bitstream_reader.readAbbrevDefOp();
+            const id_encoding = try self.bitstream_reader.readAbbrevOp();
             switch (id_encoding) {
-                .literal => {},
-                .encoded => |enc| switch (enc) {
-                    .fixed, .vbr => {},
-                    // TODO: these are invalid bitstream, not invalid bitcode
-                    .char6, .array, .blob => return try self.parseError(
-                        "abbrev record code must be encoded as literal, fixed, or vbr, but got {s}",
-                        .{@tagName(enc)},
-                    ),
-                },
+                inline .constant, .fixed, .vbr => {},
+                .char6, .array, .blob => return try self.parseError(
+                    "abbrev record code must be encoded as literal, fixed, or vbr, but got {s}",
+                    .{@tagName(id_encoding)},
+                ),
             }
             var abbrev = Abbrev{
                 .id_encoding = id_encoding,
@@ -617,13 +614,13 @@ pub fn Parser(comptime ReaderType: type) type {
 
             const arg_count = op_count - 1;
             if (arg_count > 0) {
-                const ops = try self.arena.allocator().alloc(bitstream.AbbrevDefOp, arg_count);
+                const ops = try self.arena.allocator().alloc(bitstream.AbbrevOp, arg_count);
 
                 var i: u32 = 0;
                 while (i < arg_count) : (i += 1) {
-                    const op = try self.bitstream_reader.readAbbrevDefOp();
+                    const op = try self.bitstream_reader.readAbbrevOp();
                     std.log.info("  ABBREV OP: {any}", .{op});
-                    if (op == .encoded) switch (op.encoded) {
+                    switch (op) {
                         // TODO: these are invalid bitstream, not invalid bitcode
                         .array => {
                             if (i + 2 != arg_count) {
@@ -636,7 +633,7 @@ pub fn Parser(comptime ReaderType: type) type {
                             }
                         },
                         else => {},
-                    };
+                    }
                     ops[i] = op;
                 }
 
@@ -686,12 +683,10 @@ pub fn Parser(comptime ReaderType: type) type {
 
             fn readRecordCode(self: *AbbrevDecoder) !u64 {
                 return switch (self.abbrev.id_encoding) {
-                    .literal => |lit| lit,
-                    .encoded => |enc| switch (enc) {
-                        .fixed => |width| try self.p.bitstream_reader.readInt(u64, width),
-                        .vbr => |width| try self.p.bitstream_reader.readVbr(u64, width),
-                        .char6, .array, .blob => unreachable, // rejected during DEFINE_ABBREV
-                    },
+                    .constant => |c| c,
+                    .fixed => |width| try self.p.bitstream_reader.readInt(u64, @intCast(u6, width)),
+                    .vbr => |width| try self.p.bitstream_reader.readVbr(u64, @intCast(u5, width)),
+                    .char6, .array, .blob => unreachable, // rejected during DEFINE_ABBREV
                 };
             }
 
@@ -704,26 +699,24 @@ pub fn Parser(comptime ReaderType: type) type {
                         const encoding = self.abbrev.op_encoding[index.*];
                         index.* += 1;
                         return switch (encoding) {
-                            .literal => |lit| lit,
-                            .encoded => |enc| switch (enc) {
-                                .fixed => |width| try self.p.bitstream_reader.readInt(u64, width),
-                                .vbr => |width| try self.p.bitstream_reader.readVbr(u64, width),
-                                .char6 => try self.p.bitstream_reader.readChar6(),
-                                .array => {
-                                    assert(index.* == self.abbrev.op_encoding.len - 1);
-                                    const elem_count = try self.p.bitstream_reader.readVbr(u32, 6);
-                                    self.state = .{ .array = elem_count };
-                                    std.log.info("GOT A ARRAY, LEN IS {}", .{elem_count});
-                                    return try self.readOp(); // first array value
-                                },
-                                .blob => {
-                                    assert(index.* == self.abbrev.op_encoding.len);
-                                    const byte_count = try self.p.bitstream_reader.readVbr(u32, 6);
-                                    try self.p.bitstream_reader.alignToWord(); // blob contents start aligned
-                                    self.state = .{ .blob = byte_count };
-                                    std.log.info("GOT A BLOB, LEN IS {}", .{byte_count});
-                                    return try self.readOp(); // first byte
-                                },
+                            .constant => |c| c,
+                            .fixed => |width| try self.p.bitstream_reader.readInt(u64, @intCast(u6, width)),
+                            .vbr => |width| try self.p.bitstream_reader.readVbr(u64, @intCast(u5, width)),
+                            .char6 => try self.p.bitstream_reader.readChar6(),
+                            .array => {
+                                assert(index.* == self.abbrev.op_encoding.len - 1);
+                                const elem_count = try self.p.bitstream_reader.readVbr(u32, 6);
+                                self.state = .{ .array = elem_count };
+                                std.log.info("GOT A ARRAY, LEN IS {}", .{elem_count});
+                                return try self.readOp(); // first array value
+                            },
+                            .blob => {
+                                assert(index.* == self.abbrev.op_encoding.len);
+                                const byte_count = try self.p.bitstream_reader.readVbr(u32, 6);
+                                try self.p.bitstream_reader.alignToWord(); // blob contents start aligned
+                                self.state = .{ .blob = byte_count };
+                                std.log.info("GOT A BLOB, LEN IS {}", .{byte_count});
+                                return try self.readOp(); // first byte
                             },
                         };
                     },
@@ -736,13 +729,11 @@ pub fn Parser(comptime ReaderType: type) type {
                         rem.* -= 1;
                         const elem_encoding = self.abbrev.op_encoding[self.abbrev.op_encoding.len - 1];
                         return switch (elem_encoding) {
-                            .literal => |lit| lit,
-                            .encoded => |enc| switch (enc) {
-                                .fixed => |width| try self.p.bitstream_reader.readInt(u64, width),
-                                .vbr => |width| try self.p.bitstream_reader.readVbr(u64, width),
-                                .char6 => try self.p.bitstream_reader.readChar6(),
-                                .array, .blob => unreachable, // rejected during DEFINE_ABBREV
-                            },
+                            .constant => |c| c,
+                            .fixed => |width| try self.p.bitstream_reader.readInt(u64, @intCast(u6, width)),
+                            .vbr => |width| try self.p.bitstream_reader.readVbr(u64, @intCast(u5, width)),
+                            .char6 => try self.p.bitstream_reader.readChar6(),
+                            .array, .blob => unreachable, // rejected during DEFINE_ABBREV
                         };
                     },
                     .blob => |*rem| {
@@ -762,7 +753,7 @@ pub fn Parser(comptime ReaderType: type) type {
         fn abbrevDecoder(
             self: *Self,
             block_id: Bitcode.BlockId,
-            abbr_id: bitstream.AbbreviationId,
+            abbr_id: codes.abbrev.Id,
         ) ?RecordDecoder(AbbrevDecoder) {
             const abbrev = self.getAbbrev(block_id, abbr_id) orelse return null;
             const impl = AbbrevDecoder{ .p = self, .abbrev = abbrev };

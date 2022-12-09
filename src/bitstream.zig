@@ -4,76 +4,53 @@ const std = @import("std");
 const io = std.io;
 const assert = std.debug.assert;
 
-// TODO: rename to AbbrevId for consitency
-pub const AbbreviationId = enum(u32) {
-    END_BLOCK,
-    ENTER_SUBBLOCK,
-    DEFINE_ABBREV,
-    UNABBREV_RECORD,
-    _,
-
-    pub const first_application_abbrev_id = 4;
-};
-
-/// Standard block IDs
-pub const BlockId = enum(u32) {
-    BLOCKINFO,
-    _,
-
-    /// All application-specific headers must be this value or higher.
-    pub const first_application_block_id = 8;
-};
-
-pub const BlockInfoCode = enum(u32) {
-    /// Sets which block ID following records apply to,
-    /// instead of the current block (which is a BLOCKINFO).
-    /// Must be the first record in a BLOCKINFO.
-    BLOCKINFO_CODE_SETBID = 1,
-    BLOCKINFO_CODE_BLOCKNAME,
-    BLOCKINFO_CODE_SETRECORDNAME,
-    /// BLOCKINFO does not allow for application-specific codes.
-    _,
-};
-
-pub const BlockHeader = struct {
-    id: BlockId,
-    new_abbr_id_width: u32,
-    word_count: u32,
-};
-
-pub const AbbrevDefOp = union(enum) {
-    literal: u64,
-    encoded: Encoding,
-
-    /// For details of the meaning of these encodings, see:
-    /// https://www.llvm.org/docs/BitCodeFormat.html#define-abbrev-encoding
-    pub const Encoding = union(Tag) {
-        pub const Tag = enum(u3) {
-            fixed = 1,
-            vbr,
-            array,
-            char6,
-            blob,
-            _,
-        };
-
-        fixed: u16,
-        vbr: u16,
-        array,
-        char6,
-        blob,
-    };
-};
+pub const codes = @import("bitstream/codes.zig");
 
 pub fn decodeChar6(c: u6) u8 {
     return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[c];
 }
 
-// TODO: use this
-pub const ReadError = error{ EndOfStream, InvalidBitstream };
+pub fn encodeChar6(c: u8) ?u6 {
+    return switch (c) {
+        'a'...'z' => c - 'a',
+        'A'...'Z' => c - 'A' + 26,
+        '0'...'9' => c - '0' + 52,
+        '.' => 62,
+        '_' => 63,
+        else => null,
+    };
+}
 
-// TODO: Should read* functions implicitly return u64 instead of taking T: type?
-// The spec does not mention a general max size for fixed ints or VBRs.
+pub const BitstreamError = error{
+    /// Unexpectedly reached the end of the Reader stream when expecting more bits.
+    EndOfStream,
+    /// The VBR being decoded does not fit into the requested type.
+    Overflow,
+    /// The bitstream can be decoded, but contains nonsense values.
+    /// For example, an invalid abbrev encoding rule.
+    InvalidBitstream,
+};
+
+pub const BlockHeader = struct {
+    id: codes.block.Id,
+    /// All abbreviation IDs in this block will be a fixed-width integer with this many bits.
+    abbrev_width: u5,
+    /// Number of 32-bit words taken up by this block.
+    word_count: u32,
+};
+
+/// A single operand from an abbreviation definition.
+/// Note that the successful parsing of a single operand does not mean
+/// that the definition is valid. See `Reader.readAbbrevOp()` for details.
+pub const AbbrevOp = union(enum) {
+    constant: u64,
+    fixed: u32,
+    vbr: u32,
+    char6,
+    blob,
+    array,
+};
+
 pub fn Reader(comptime ReaderType: type) type {
     return struct {
         bit_reader: BitReaderType,
@@ -82,6 +59,7 @@ pub fn Reader(comptime ReaderType: type) type {
 
         const Self = @This();
         const BitReaderType = io.BitReader(.Little, ReaderType);
+        const Error = BitstreamError || BitReaderType.Error;
 
         pub fn init(unberlying_reader: ReaderType) Self {
             return Self{
@@ -91,20 +69,29 @@ pub fn Reader(comptime ReaderType: type) type {
         }
 
         /// Read a variable bit-width integer (VBR), returning it as a T.
-        /// `T` must be an unsigned integer type.
-        /// `width` is the number of bits in the value's encoding, which is application-specific.
-        pub fn readVbr(self: *Self, comptime T: type, width: u16) !T {
+        /// `T` must be an unsigned integer type no larger than u64.
+        /// `width` is the number of bits in each VBR chunk, which is application-specific.
+        ///
+        /// Individual VBR chunks can max 32 bits wide, hence width is a u5.
+        pub fn readVbr(self: *Self, comptime T: type, width: u5) !T {
+            const t_info = @typeInfo(T).Int;
+            assert(t_info.bits <= 64 and t_info.signedness == .unsigned);
+            assert(width > 0);
+
             const ShiftT = std.math.Log2Int(T);
+            const PaddedShiftT = std.meta.Int(.unsigned, @typeInfo(ShiftT).Int.bits + 1);
             const val_bits = @intCast(ShiftT, width - 1);
 
             var val: T = 0;
-            var shift: ShiftT = 0;
+            var shift: PaddedShiftT = 0;
             var more = true;
 
+            // TODO: return error.Overflow if doesn't fit,
+            // or error.InvalidBitstream if high bit still set after u32 is full
             while (more) : (shift += val_bits) {
                 const res = try self.bit_reader.readBitsNoEof(T, val_bits);
                 more = (try self.bit_reader.readBitsNoEof(u1, 1)) == 1;
-                val += @shlExact(res, shift);
+                val += @shlExact(res, @intCast(ShiftT, shift));
                 self.pos += width;
             }
 
@@ -112,19 +99,23 @@ pub fn Reader(comptime ReaderType: type) type {
         }
 
         /// Read a fixed-width integer, returning it as a T.
-        pub fn readInt(self: *Self, comptime T: type, width: u16) !T {
+        /// `T` must be an unsigned integer type no larger than u64.
+        /// `width` is the number of bits in the value's encoding, which is application-specific.
+        pub fn readInt(self: *Self, comptime T: type, width: u6) !T {
+            const t_info = @typeInfo(T).Int;
+            assert(t_info.bits <= 64 and t_info.signedness == .unsigned);
+            assert(width > 0);
+
             const val = try self.bit_reader.readBitsNoEof(T, width);
             self.pos += width;
             return val;
         }
 
         /// Read a fixed-width integer, returning it as a T.
-        /// T must be no larger than 32 bits.
         /// Width of the fixed field is inferred from T;
         /// to read an int with a runtime-known width, use `readInt`.
         pub fn readIntAuto(self: *Self, comptime T: type) !T {
             const bits = @typeInfo(T).Int.bits;
-            assert(bits <= 32);
             return self.readInt(T, bits);
         }
 
@@ -136,10 +127,13 @@ pub fn Reader(comptime ReaderType: type) type {
         }
 
         /// Read the "magic" header at the start of a bitstream.
-        /// This must be the first read function called on a bitstream.
+        /// Asserts that this is only called at the start of a bitstream.
+        /// Does not validate the contents of the magic bytes.
         pub fn readMagic(self: *Self) ![4]u8 {
+            assert(self.pos == 0);
             var buf: [4]u8 = undefined;
-            self.pos += try self.bit_reader.reader().readAll(&buf) * 8;
+            try self.bit_reader.reader().readNoEof(&buf);
+            self.pos += 4 * 8;
             return buf;
         }
 
@@ -147,23 +141,33 @@ pub fn Reader(comptime ReaderType: type) type {
         /// Caller must keep track of the ID width for the given block scope,
         /// which is determined by the block's header.
         /// For the outermost scope, always use an abbeviation width of 2.
-        pub fn readAbbreviationId(self: *Self, width: u32) !AbbreviationId {
-            const id = try self.bit_reader.readBitsNoEof(u32, width);
-            self.pos += width;
-            return @intToEnum(AbbreviationId, id);
+        pub fn readAbbrevId(self: *Self, width: u5) !codes.abbrev.Id {
+            const id = try self.readInt(u32, width);
+            return @intToEnum(codes.abbrev.Id, id);
         }
 
-        pub fn readAbbrevDefOp(self: *Self) !AbbrevDefOp {
+        /// Reads a single abbreviation definition operand.
+        /// Beware that this does not validate a sensical abbreviation,
+        /// so alone it does not detect that arrays or blobs are correctly defined.
+        ///
+        /// When parsing an abbreviation definition, the caller must ensure that:
+        ///
+        /// - If this returns .array, there is exactly one more operand following it,
+        ///   and the final operand is a fixed, vbr, or char6.
+        /// - If this returns .blob, there are zero more operands.
+        pub fn readAbbrevOp(self: *Self) !AbbrevOp {
             const is_literal = try self.readIntAuto(u1) == 1;
             if (is_literal) {
-                const value = try self.readVbr(u32, 8);
-                return AbbrevDefOp{ .literal = value };
+                const value = try self.readVbr(u64, 8);
+                return AbbrevOp{ .constant = value };
             } else {
-                const encoding = @intToEnum(AbbrevDefOp.Encoding.Tag, try self.readIntAuto(u3));
+                const encoding = @intToEnum(codes.abbrev.OpEncoding, try self.readIntAuto(u3));
                 switch (encoding) {
-                    .fixed => return AbbrevDefOp{ .encoded = .{ .fixed = try self.readVbr(u16, 5) } },
-                    .vbr => return AbbrevDefOp{ .encoded = .{ .vbr = try self.readVbr(u16, 5) } },
-                    inline .array, .char6, .blob => |enc| return AbbrevDefOp{ .encoded = enc },
+                    .fixed => return AbbrevOp{ .fixed = try self.readVbr(u6, 5) },
+                    .vbr => return AbbrevOp{ .vbr = try self.readVbr(u5, 5) },
+                    .char6 => return AbbrevOp.char6,
+                    .blob => return AbbrevOp.blob,
+                    .array => return AbbrevOp.array,
                     _ => return error.InvalidBitstream,
                 }
             }
@@ -171,12 +175,12 @@ pub fn Reader(comptime ReaderType: type) type {
 
         pub fn readSubBlockHeader(self: *Self) !BlockHeader {
             const block_id = try self.readVbr(u32, 8);
-            const new_abbr_id_width = try self.readVbr(u32, 4);
+            const abbrev_width = try self.readVbr(u5, 4);
             try self.alignToWord();
             const block_words = try self.readIntAuto(u32);
             return BlockHeader{
-                .id = @intToEnum(BlockId, block_id),
-                .new_abbr_id_width = new_abbr_id_width,
+                .id = @intToEnum(codes.block.Id, block_id),
+                .abbrev_width = abbrev_width,
                 .word_count = block_words,
             };
         }
@@ -234,7 +238,7 @@ test "vbr" {
 
     fbs.reset();
     r = reader(fbs.reader());
-    try testing.expectEqual(@as(u99, 17214), try r.readVbr(u99, 9));
+    try testing.expectEqual(@as(u64, 17214), try r.readVbr(u64, 9));
     try testing.expectEqual(@as(usize, 18), r.pos);
 }
 

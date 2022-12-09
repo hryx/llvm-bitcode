@@ -5,12 +5,13 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const bitstream = @import("bitstream.zig");
+const codes = bitstream.codes;
 
 /// Magic header byte that always appears at the start of LLVM bitcode.
 pub const magic = [4]u8{ 'B', 'C', 0xc0, 0xde };
 
-pub const BlockId = enum(std.meta.Tag(bitstream.BlockId)) {
-    MODULE_BLOCK_ID = bitstream.BlockId.first_application_block_id,
+pub const BlockId = enum(std.meta.Tag(codes.block.Id)) {
+    MODULE_BLOCK_ID = codes.block.Id.first_application_id,
     PARAMATTR_BLOCK_ID,
     PARAMATTR_GROUP_BLOCK_ID,
     CONSTANTS_BLOCK_ID,
@@ -33,8 +34,8 @@ pub const BlockId = enum(std.meta.Tag(bitstream.BlockId)) {
 
     pub const last_known_block_id = BlockId.SYNC_SCOPE_NAMES_BLOCK_ID;
 
-    pub fn fromBitstreamBlockId(from: bitstream.BlockId) BlockId {
-        assert(@enumToInt(from) >= bitstream.BlockId.first_application_block_id);
+    pub fn fromBitstreamBlockId(from: codes.block.Id) BlockId {
+        assert(@enumToInt(from) >= codes.block.Id.first_application_id);
         return @intToEnum(BlockId, @enumToInt(from));
     }
 };

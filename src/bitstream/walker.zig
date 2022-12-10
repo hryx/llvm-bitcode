@@ -173,6 +173,7 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                             if (top == null) {
                                 return error.InvalidAbbrevId; // END_BLOCK at top level
                             }
+                            _ = self.block_stack.pop();
                             try self.r.endBlock();
                             return Entry.end_block;
                         },
@@ -184,11 +185,15 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                                     return self.next(); // TODO: iterate, don't recurse
                                 },
                                 _ => {
+                                    const block_id = @enumToInt(header.id);
+                                    if (block_id < codes.block.Id.first_application_id) {
+                                        return error.InvalidBitstream;
+                                    }
                                     try self.block_stack.append(self.arena.allocator(), .{
-                                        .block_id = @enumToInt(header.id),
+                                        .block_id = block_id,
                                         .abbrev_id_width = header.abbrev_width,
                                     });
-                                    return Entry{ .enter_block = @enumToInt(header.id) };
+                                    return Entry{ .enter_block = block_id };
                                 },
                             }
                         },
@@ -225,20 +230,6 @@ pub fn Walker(comptime opts: WalkerOptions) type {
             }
         }
 
-        fn parseDefineAbbrev(self: *Self, into: *ArrayListUnmanaged(ParsedAbbrev)) !void {
-            _ = self;
-            _ = into;
-            // TODO: Handle ambiguous abbrev ID assignment
-            // Return error.InvalidBitstream if defining an abbrev when a local was already found
-            @panic("TODO: parse abbrev def");
-        }
-
-        fn parseBlockInfo(self: *Self, abbrev_width: u5) !void {
-            _ = self;
-            _ = abbrev_width;
-            @panic("TODO: parse block info");
-        }
-
         /// Does not observe or update state.
         fn readAbbrevScalar(self: *Self, comptime T: type, encoding: ParsedAbbrev.Scalar) !T {
             return switch (encoding) {
@@ -268,8 +259,8 @@ pub fn Walker(comptime opts: WalkerOptions) type {
             const abbr = self.state.abbrev_record.def;
             assert(self.state.abbrev_record.state.scalars_index == abbr.ops.len);
             if (abbr.final) |final| switch (final) {
-                .array => |enc| {
-                    const len = try self.readAbbrevScalar(u32, enc);
+                .array => {
+                    const len = try self.r.readVbr(u32, 6);
                     self.state.abbrev_record.state = .{ .array = .{ .index = 0, .len = len } };
                 },
                 .blob => {
@@ -277,8 +268,9 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                     try self.r.alignToWord();
                     self.state.abbrev_record.state = .{ .blob = len };
                 },
-            };
-            self.state.abbrev_record.state = .done;
+            } else {
+                self.state.abbrev_record.state = .done;
+            }
         }
 
         pub fn nextRecordValue(self: *Self, comptime T: type) !?T {
@@ -319,7 +311,7 @@ pub fn Walker(comptime opts: WalkerOptions) type {
             errdefer list.deinit();
             try self.remainingRecordValuesAllocInner(T, &list);
             if (list.items.len > 0) {
-                return list.toOwnedSlice();
+                return try list.toOwnedSlice();
             }
             list.deinit();
             return null;
@@ -334,17 +326,17 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                     try list.ensureUnusedCapacity(rem);
                     while (rec.index < rec.len) : (rec.index += 1) {
                         const val = try self.r.readVbr(T, 6);
-                        list.appendAssumeCapacity(T, val);
+                        list.appendAssumeCapacity(val);
                     }
                 },
                 .abbrev_record => |*rec| {
                     switch (rec.state) {
                         .scalars_index => |index| {
-                            const rem = rec.def.ops.len - index;
+                            const rem = @intCast(u32, rec.def.ops.len - index);
                             if (rem > 0) {
                                 try list.ensureUnusedCapacity(rem);
                                 for (rec.def.ops[index..]) |enc| {
-                                    const val = try self.readAbbrevScalar(enc);
+                                    const val = try self.readAbbrevScalar(T, enc);
                                     list.appendAssumeCapacity(val);
                                 }
                                 rec.state.scalars_index += rem;
@@ -354,14 +346,14 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                             try self.remainingRecordValuesAllocInner(T, list);
                         },
                         .array => |array| {
-                            const rem = array.len - array.index;
+                            const rem = @intCast(u32, array.len - array.index);
                             if (rem > 0) {
                                 try list.ensureUnusedCapacity(rem);
                                 var i: u32 = 0;
                                 while (i < rem) : (i += 1) {
                                     const enc = rec.def.final.?.array;
-                                    const val = try self.readAbbrevScalar(enc);
-                                    list.appendAssumeCapacity(T, val);
+                                    const val = try self.readAbbrevScalar(T, enc);
+                                    list.appendAssumeCapacity(val);
                                 }
                             }
                             self.state.abbrev_record.state = .done;
@@ -400,6 +392,7 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                                 rec.state = .done;
                                 return false;
                             }
+                            rec.state.array.index += 1;
                             const enc = rec.def.final.?.array;
                             try self.skipAbbrevScalar(enc);
                             return true;
@@ -432,9 +425,11 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                         },
                         .array => return null,
                         .blob => |len| {
-                            rec.state = .done;
                             const start: usize = self.r.pos / 8;
                             const end = start + len;
+                            try self.r.skipBits(@intCast(usize, len) * 8);
+                            try self.r.alignToWord();
+                            rec.state = .done;
                             return self.src[start..end];
                         },
                         .done => return null,
@@ -443,8 +438,42 @@ pub fn Walker(comptime opts: WalkerOptions) type {
             }
         }
 
-        fn getBlockInfo(self: *Self, id: u32) !*BlockInfo {
-            return self.block_infos.getOrCreate(self.arena.allocator(), id);
+        fn parseBlockInfo(self: *Self, abbrev_width: u5) !void {
+            var dst_block_id: ?u32 = null;
+            while (true) {
+                const id = try self.r.readAbbrevId(abbrev_width);
+                switch (id) {
+                    .END_BLOCK => {
+                        try self.r.endBlock();
+                        return;
+                    },
+                    .ENTER_SUBBLOCK => return error.InvalidBitstream,
+                    .DEFINE_ABBREV => {
+                        if (dst_block_id) |bid| {
+                            const bi = try self.getBlockInfo(bid);
+                            try self.parseDefineAbbrev(&bi.abbrevs);
+                        } else return error.InvalidBitstream;
+                    },
+                    .UNABBREV_RECORD => {
+                        const code = try self.r.readVbr(u32, 6);
+                        const length = try self.r.readVbr(u32, 6);
+                        switch (@intToEnum(codes.record.block_info.Id, code)) {
+                            .BLOCKINFO_CODE_SETBID => {
+                                if (length != 1) return error.InvalidBitstream;
+                                dst_block_id = try self.r.readVbr(u32, 6);
+                            },
+                            .BLOCKINFO_CODE_BLOCKNAME => @panic("TODO BLOCKNAME"),
+                            .BLOCKINFO_CODE_SETRECORDNAME => @panic("TODO SETRECORDNAME"),
+                            _ => return error.InvalidBitstream,
+                        }
+                    },
+                    _ => return error.InvalidBitstream,
+                }
+            }
+        }
+
+        fn getBlockInfo(self: *Self, block_id: u32) !*BlockInfo {
+            return self.block_infos.getOrCreate(self.arena.allocator(), block_id);
         }
 
         fn stackTop(self: *Self) ?*StackItem {
@@ -453,11 +482,71 @@ pub fn Walker(comptime opts: WalkerOptions) type {
             return &self.block_stack.items[len - 1];
         }
 
+        fn parseDefineAbbrev(self: *Self, into: *ArrayListUnmanaged(ParsedAbbrev)) !void {
+            const op_count = try self.r.readVbr(u32, 5);
+            if (op_count == 0) return error.InvalidBitstream;
+
+            const code_op = try self.r.readAbbrevOp();
+            const code_enc = switch (code_op) {
+                .constant, .fixed, .vbr => ParsedAbbrev.Scalar.fromAbbrevDefOp(code_op),
+                .char6, .array, .blob => return error.InvalidBitstream,
+            };
+
+            const arg_count = op_count - 1;
+            var args = try ArrayList(ParsedAbbrev.Scalar)
+                .initCapacity(self.arena.allocator(), arg_count);
+            defer args.deinit();
+
+            var final: ?ParsedAbbrev.Aggregate = null;
+
+            var i: u32 = 0;
+            while (i < arg_count) : (i += 1) {
+                const op = try self.r.readAbbrevOp();
+                switch (op) {
+                    .constant,
+                    .fixed,
+                    .vbr,
+                    .char6,
+                    => args.appendAssumeCapacity(ParsedAbbrev.Scalar.fromAbbrevDefOp(op)),
+                    .array => {
+                        if (i + 2 != arg_count) {
+                            return error.InvalidBitstream;
+                        }
+                        i += 1;
+                        const elem = try self.r.readAbbrevOp();
+                        switch (elem) {
+                            .constant,
+                            .fixed,
+                            .vbr,
+                            .char6,
+                            => final = .{ .array = ParsedAbbrev.Scalar.fromAbbrevDefOp(elem) },
+                            else => return error.InvalidBitstream,
+                        }
+                    },
+                    .blob => {
+                        if (i + 1 != arg_count) {
+                            return error.InvalidBitstream;
+                        }
+                        final = .blob;
+                    },
+                }
+            }
+
+            try into.append(self.arena.allocator(), .{
+                .record_code = code_enc,
+                .ops = try args.toOwnedSlice(),
+                .final = final,
+            });
+
+            // TODO: Handle ambiguous abbrev ID assignment
+            // Return error.InvalidBitstream if defining an abbrev when a local was already found
+        }
+
         // Returns an error instead of null for undefined abbreviations
         // because it represents a malformed stream which cannot be decoded further.
         fn getAbbrev(self: *Self, block_id: u32, abbrev_id: u32) !*const ParsedAbbrev {
             assert(abbrev_id >= codes.abbrev.Id.first_application_id);
-            const index = codes.abbrev.Id.first_application_id - abbrev_id;
+            const index = abbrev_id - codes.abbrev.Id.first_application_id;
 
             // Considered a "global" abbrev ID, set in a BLOCKINFO.
             const bi = try self.getBlockInfo(block_id);
@@ -487,6 +576,16 @@ const ParsedAbbrev = struct {
         fixed: u6,
         vbr: u5,
         char6,
+
+        fn fromAbbrevDefOp(op: bitstream.AbbrevOp) Scalar {
+            return switch (op) {
+                .constant => |x| Scalar{ .literal = x },
+                .fixed => |x| Scalar{ .fixed = x },
+                .vbr => |x| Scalar{ .vbr = x },
+                .char6 => Scalar.char6,
+                .blob, .array => unreachable,
+            };
+        }
     };
 
     const Aggregate = union(enum) {

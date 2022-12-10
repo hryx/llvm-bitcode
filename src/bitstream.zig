@@ -48,8 +48,8 @@ pub const BlockHeader = struct {
 /// that the definition is valid. See `Reader.readAbbrevOp()` for details.
 pub const AbbrevOp = union(enum) {
     constant: u64,
-    fixed: u32,
-    vbr: u32,
+    fixed: u6,
+    vbr: u5,
     char6,
     blob,
     array,
@@ -82,20 +82,21 @@ pub fn Reader(comptime ReaderType: type) type {
             assert(t_info.bits <= 64 and t_info.signedness == .unsigned);
             assert(width > 0);
 
-            const ShiftT = std.math.Log2Int(T);
-            const PaddedShiftT = std.meta.Int(.unsigned, @typeInfo(ShiftT).Int.bits + 1);
+            const Chunk = u32;
+            const ShiftT = std.math.Log2Int(Chunk);
             const val_bits = @intCast(ShiftT, width - 1);
 
             var val: T = 0;
-            var shift: PaddedShiftT = 0;
+            var shift: Chunk = 0;
             var more = true;
 
             // TODO: return error.Overflow if doesn't fit,
             // or error.InvalidBitstream if high bit still set after u32 is full
             while (more) : (shift += val_bits) {
-                const res = try self.bit_reader.readBitsNoEof(T, val_bits);
+                const res = try self.bit_reader.readBitsNoEof(Chunk, val_bits);
+                const shifted = @shlExact(res, @intCast(ShiftT, shift));
+                val += @intCast(T, shifted);
                 more = (try self.bit_reader.readBitsNoEof(u1, 1)) == 1;
-                val += @shlExact(res, @intCast(ShiftT, shift));
                 self.pos += width;
             }
 

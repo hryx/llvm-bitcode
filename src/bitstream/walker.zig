@@ -55,10 +55,7 @@ pub fn Walker(comptime opts: WalkerOptions) type {
         known: [block_infos_len]BlockInfo = [1]BlockInfo{.{}} ** block_infos_len,
         unknown: AutoHashMapUnmanaged(u32, BlockInfo) = .{},
 
-        // TODO: self: *BlockInfoRegistry causes unknown identifier
-        const Reg = @This();
-
-        fn getOrCreate(self: *Reg, allocator: Allocator, id: u32) !*BlockInfo {
+        fn getOrCreate(self: *@This(), allocator: Allocator, id: u32) !*BlockInfo {
             assert(id >= codes.block.Id.first_application_id);
             const index = id - codes.block.Id.first_application_id;
             if (index < self.known.len) {
@@ -306,15 +303,22 @@ pub fn Walker(comptime opts: WalkerOptions) type {
             }
         }
 
+        /// Returns null if the the record is terminated by a blob.
+        /// Otherwise returns remaining elements as a slice, even if there
+        /// are zero left.
         pub fn remainingRecordValuesAlloc(self: *Self, comptime T: type, allocator: Allocator) !?[]T {
-            var list = ArrayList(T).init(allocator);
-            errdefer list.deinit();
-            try self.remainingRecordValuesAllocInner(T, &list);
-            if (list.items.len > 0) {
-                return try list.toOwnedSlice();
+            switch (self.state) {
+                .start, .block => unreachable, // Only call when parsing a record
+                .unabbrev_record => {},
+                .abbrev_record => |rec| switch (rec.state) {
+                    .blob, .done => return null,
+                    else => {},
+                },
             }
-            list.deinit();
-            return null;
+            var list = ArrayList(T).init(allocator);
+            defer list.deinit();
+            try self.remainingRecordValuesAllocInner(T, &list);
+            return try list.toOwnedSlice();
         }
 
         fn remainingRecordValuesAllocInner(self: *Self, comptime T: type, list: *ArrayList(T)) !void {
@@ -358,7 +362,7 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                             }
                             self.state.abbrev_record.state = .done;
                         },
-                        .blob, .done => {},
+                        .blob, .done => unreachable,
                     }
                 },
             }

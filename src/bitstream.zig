@@ -5,6 +5,10 @@ const io = std.io;
 const assert = std.debug.assert;
 
 pub const codes = @import("bitstream/codes.zig");
+const w = @import("bitstream/walker.zig");
+pub const walker = w.walker;
+pub const Walker = w.Walker;
+pub const WalkerOptions = w.WalkerOptions;
 
 pub fn decodeChar6(c: u6) u8 {
     return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[c];

@@ -74,6 +74,7 @@ pub const Module = struct {
     gc_name: [][]const u8 = &.{},
     global_var: []GlobalVar = &.{},
     function: []Function = &.{},
+    aliases: []Alias = &.{},
     vst_offset: struct {} = .{},
     constants: Constants = .{},
 
@@ -419,6 +420,19 @@ pub const Module = struct {
 
             pub const jsonStringify = defaultEnumJsonStringify(@This());
         };
+    };
+
+    pub const Alias = struct {
+        strtab_offset: u32,
+        strtab_size: u32,
+        type_index: u32,
+        aliasee_val_index: u32,
+        linkage: GlobalVar.Linkage,
+        visibility: GlobalVar.Visibility,
+        dll_storage_class: GlobalVar.DllStorageClass,
+        @"threadlocal": GlobalVar.Threadlocal,
+        unnamed_addr: GlobalVar.UnnamedAddr,
+        preemption_specifier: GlobalVar.PreemptionSpecifier,
     };
 
     pub const Constants = struct {

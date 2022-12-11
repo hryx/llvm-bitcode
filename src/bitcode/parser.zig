@@ -163,9 +163,6 @@ fn Parser(comptime Walker: type) type {
 
         fn parseModuleRecord(self: *Self, rc: Bitcode.Module.Code) !void {
             switch (rc) {
-                .MODULE_CODE_ALIAS => {
-                    std.log.warn("TODO: module record code {s}", .{@tagName(rc)});
-                },
                 .MODULE_CODE_GLOBALVAR => {
                     const G = Bitcode.Module.GlobalVar;
                     const g = G{
@@ -253,6 +250,23 @@ fn Parser(comptime Walker: type) type {
                 .MODULE_CODE_DEPLIB => {
                     const name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
                     try self.appendOne([]const u8, &self.bc.module.deplib, name);
+                },
+                .MODULE_CODE_ALIAS => {
+                    const A = Bitcode.Module.Alias;
+                    const G = Bitcode.Module.GlobalVar;
+                    const a = A{
+                        .strtab_offset = try self.parseOp(u32),
+                        .strtab_size = try self.parseOp(u32),
+                        .type_index = try self.parseOp(u32),
+                        .aliasee_val_index = try self.parseOp(u32),
+                        .linkage = try self.parseOp(G.Linkage),
+                        .visibility = try self.parseOp(G.Visibility),
+                        .dll_storage_class = try self.parseOp(G.DllStorageClass),
+                        .@"threadlocal" = try self.parseOp(G.Threadlocal),
+                        .unnamed_addr = try self.parseOp(G.UnnamedAddr),
+                        .preemption_specifier = try self.parseOp(G.PreemptionSpecifier),
+                    };
+                    try self.appendOne(A, &self.bc.module.aliases, a);
                 },
                 .MODULE_CODE_GCNAME => {
                     const name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;

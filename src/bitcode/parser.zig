@@ -126,8 +126,9 @@ fn Parser(comptime Walker: type) type {
                     self.found.identification = true;
                     try blockLoop(Bitcode.Idendification.Code, parseIdentificationRecord)(self);
                 },
-                .MODULE_STRTAB_BLOCK_ID => try blockLoop(Bitcode.Strtab.Code, parseStrtabRecord)(self),
                 .TYPE_BLOCK_ID => try blockLoop(Bitcode.Module.Type.Code, parseTypeRecord)(self),
+                .STRTAB_BLOCK_ID => try blockLoop(Bitcode.Strtab.Code, parseStrtabRecord)(self),
+                .MODULE_STRTAB_BLOCK_ID,
                 .PARAMATTR_BLOCK_ID,
                 .PARAMATTR_GROUP_BLOCK_ID,
                 .CONSTANTS_BLOCK_ID,
@@ -141,7 +142,6 @@ fn Parser(comptime Walker: type) type {
                 .METADATA_KIND_BLOCK_ID,
                 .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
                 .SYMTAB_BLOCK_ID,
-                .STRTAB_BLOCK_ID,
                 .SYNC_SCOPE_NAMES_BLOCK_ID,
                 => {
                     std.log.err("TODO: parse block ID {}", .{block_id});
@@ -163,17 +163,7 @@ fn Parser(comptime Walker: type) type {
 
         fn parseModuleRecord(self: *Self, rc: Bitcode.Module.Code) !void {
             switch (rc) {
-                .MODULE_CODE_VERSION,
-                .MODULE_CODE_TRIPLE,
-                .MODULE_CODE_DATALAYOUT,
-                .MODULE_CODE_ASM,
-                .MODULE_CODE_SECTIONNAME,
-                .MODULE_CODE_DEPLIB,
-                .MODULE_CODE_FUNCTION,
-                .MODULE_CODE_ALIAS,
-                .MODULE_CODE_GCNAME,
-                .MODULE_CODE_SOURCE_FILENAME,
-                => {
+                .MODULE_CODE_ALIAS => {
                     std.log.warn("TODO: module record code {s}", .{@tagName(rc)});
                 },
                 .MODULE_CODE_GLOBALVAR => {
@@ -200,6 +190,73 @@ fn Parser(comptime Walker: type) type {
                         // 17 partition strtab size
                     };
                     try self.appendOne(G, &self.bc.module.global_var, g);
+                },
+                .MODULE_CODE_FUNCTION => {
+                    const F = Bitcode.Module.Function;
+                    const G = Bitcode.Module.GlobalVar;
+                    const f = F{
+                        .strtab_offset = try self.parseOp(u32),
+                        .strtab_size = try self.parseOp(u32),
+                        .type_index = try self.parseOp(u32),
+                        .calling_conv = try self.parseOp(F.CallingConv),
+                        .is_proto = try self.parseOp(bool),
+                        .linkage = try self.parseOp(G.Linkage),
+                        .param_attr_index = try self.parseOptionalIndex(u32),
+                        .alignment_log2 = try self.parseOp(u16),
+                        .section_index = try self.parseOptionalIndex(u32),
+                        .visibility = try self.parseOp(G.Visibility),
+                        .gc_index = try self.parseOptionalIndex(u32),
+                        .unnamed_addr = try self.parseOp(G.UnnamedAddr),
+                        .prologue_data_index = try self.parseOptionalIndex(u32),
+                        .dll_storage_class = try self.parseOp(G.DllStorageClass),
+                        .comdat = try self.parseOp(u64), // TODO
+                        .prefix_index = try self.parseOptionalIndex(u32),
+                        .personality_fn_index = try self.parseOptionalIndex(u32),
+                        .preemption_specifier = try self.parseOp(G.PreemptionSpecifier),
+                    };
+                    try self.appendOne(F, &self.bc.module.function, f);
+                },
+                .MODULE_CODE_VERSION => {
+                    if (self.bc.module.version != 0) {
+                        return error.InvalidBitcode;
+                    }
+                    self.bc.module.version = try self.parseOp(u2);
+                },
+                .MODULE_CODE_TRIPLE => {
+                    if (self.bc.module.triple.len != 0) {
+                        return error.InvalidBitcode;
+                    }
+                    self.bc.module.triple = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                },
+                .MODULE_CODE_DATALAYOUT => {
+                    if (self.bc.module.data_layout.len != 0) {
+                        return error.InvalidBitcode;
+                    }
+                    self.bc.module.data_layout = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                },
+                .MODULE_CODE_SOURCE_FILENAME => {
+                    if (self.bc.module.source_filename.len != 0) {
+                        return error.InvalidBitcode;
+                    }
+                    self.bc.module.source_filename = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                },
+                .MODULE_CODE_ASM => {
+                    if (self.bc.module.@"asm".len != 0) {
+                        return error.InvalidBitcode;
+                    }
+                    self.bc.module.@"asm" = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                },
+                .MODULE_CODE_SECTIONNAME => {
+                    const name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                    try self.appendOne([]const u8, &self.bc.module.section_name, name);
+                },
+                .MODULE_CODE_DEPLIB => {
+                    const name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                    try self.appendOne([]const u8, &self.bc.module.deplib, name);
+                },
+                .MODULE_CODE_GCNAME => {
+                    const name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                    try self.appendOne([]const u8, &self.bc.module.gc_name, name);
                 },
                 _ => {
                     std.log.warn("unknown module record code {}", .{rc});

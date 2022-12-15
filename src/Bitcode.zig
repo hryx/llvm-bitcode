@@ -76,7 +76,7 @@ pub const Module = struct {
     function: []Function = &.{},
     aliases: []Alias = &.{},
     vst_offset: struct {} = .{},
-    constants: Constants = .{},
+    constants: []Constant = &.{},
 
     pub const Code = enum(u32) {
         MODULE_CODE_VERSION = 1,
@@ -398,6 +398,7 @@ pub const Module = struct {
         prefix_index: ?u32,
         personality_fn_index: ?u32,
         preemption_specifier: GlobalVar.PreemptionSpecifier,
+        constants: []Constant = &.{},
 
         pub const CallingConv = enum(u7) {
             ccc = 0,
@@ -435,10 +436,6 @@ pub const Module = struct {
         preemption_specifier: GlobalVar.PreemptionSpecifier,
     };
 
-    pub const Constants = struct {
-        // TODO
-    };
-
     pub const MetadataKind = struct {
         // TODO
     };
@@ -457,6 +454,56 @@ pub const Strtab = struct {
 
     pub const Code = enum(u1) {
         STRTAB_BLOB = 1,
+        _,
+    };
+};
+
+pub const Constant = struct {
+    type_index: u32,
+    value: Value,
+
+    pub const Value = union(enum) {
+        undef: Type,
+        null: Type,
+        int: i64,
+        wide_int: std.math.big.int.Const,
+    };
+
+    pub const Type = union(enum) {
+        // TODO
+    };
+
+    pub const Code = enum(u5) {
+        CST_CODE_SETTYPE = 1, // sets type of constant (type_list[idx]), needs to be followed by another rec val
+        CST_CODE_NULL,
+        CST_CODE_UNDEF,
+        CST_CODE_INTEGER,
+        CST_CODE_WIDE_INTEGER,
+        CST_CODE_FLOAT,
+        CST_CODE_AGGREGATE,
+        CST_CODE_STRING,
+        CST_CODE_CSTRING,
+        CST_CODE_CE_BINOP,
+        CST_CODE_CE_CAST,
+        CST_CODE_CE_GEP,
+        CST_CODE_CE_SELECT,
+        CST_CODE_CE_EXTRACTELT,
+        CST_CODE_CE_INSERTELT,
+        CST_CODE_CE_SHUFFLEVEC,
+        CST_CODE_CE_CMP,
+        CST_CODE_INLINEASM_OLD,
+        CST_CODE_CE_SHUFVEC_EX,
+        CST_CODE_CE_INBOUNDS_GEP,
+        CST_CODE_BLOCKADDRESS,
+        CST_CODE_DATA,
+        CST_CODE_INLINEASM_OLD2,
+        CST_CODE_CE_GEP_WITH_INRANGE_INDEX,
+        CST_CODE_CE_UNOP,
+        CST_CODE_POISON,
+        CST_CODE_DSO_LOCAL_EQUIVALENT,
+        CST_CODE_INLINEASM_OLD3,
+        CST_CODE_NO_CFI_VALUE,
+        CST_CODE_INLINEASM,
         _,
     };
 };

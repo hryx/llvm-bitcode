@@ -362,7 +362,8 @@ pub fn Walker(comptime opts: WalkerOptions) type {
                             }
                             self.state.abbrev_record.state = .done;
                         },
-                        .blob, .done => unreachable,
+                        .blob => unreachable,
+                        .done => {},
                     }
                 },
             }

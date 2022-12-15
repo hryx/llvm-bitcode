@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 
 const bitstream = @import("../bitstream.zig");
 const codes = bitstream.codes;
@@ -42,6 +43,7 @@ pub fn parse(gpa: Allocator, src: []const u8) !Result {
     }
 
     var p = parser(&walker, gpa);
+    errdefer p.deinit();
     p.parse() catch |err| switch (err) {
         // TODO: append error and return Result
         // error.EndOfStream => {},
@@ -63,7 +65,7 @@ fn Parser(comptime Walker: type) type {
     }
 
     return struct {
-        gpa: Allocator,
+        arena: ArenaAllocator,
         walker: Walker,
         bc: Bitcode = .{},
         found: struct {
@@ -78,9 +80,13 @@ fn Parser(comptime Walker: type) type {
 
         fn init(gpa: Allocator, walker: Walker) Self {
             return Self{
-                .gpa = gpa,
+                .arena = ArenaAllocator.init(gpa),
                 .walker = walker,
             };
+        }
+
+        fn deinit(self: *Self) void {
+            self.arena.deinit();
         }
 
         fn parse(self: *Self) !void {
@@ -120,7 +126,7 @@ fn Parser(comptime Walker: type) type {
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Idendification.Code, code)) {
                     .IDENTIFICATION_CODE_STRING => {
-                        self.bc.identification.string = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        self.bc.identification.string = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .IDENTIFICATION_CODE_EPOCH => {
                         self.bc.identification.epoch = try self.parseOp(u0);
@@ -214,32 +220,32 @@ fn Parser(comptime Walker: type) type {
                         if (self.bc.module.triple.len != 0) {
                             return error.InvalidBitcode;
                         }
-                        self.bc.module.triple = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        self.bc.module.triple = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .MODULE_CODE_DATALAYOUT => {
                         if (self.bc.module.data_layout.len != 0) {
                             return error.InvalidBitcode;
                         }
-                        self.bc.module.data_layout = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        self.bc.module.data_layout = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .MODULE_CODE_SOURCE_FILENAME => {
                         if (self.bc.module.source_filename.len != 0) {
                             return error.InvalidBitcode;
                         }
-                        self.bc.module.source_filename = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        self.bc.module.source_filename = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .MODULE_CODE_ASM => {
                         if (self.bc.module.@"asm".len != 0) {
                             return error.InvalidBitcode;
                         }
-                        self.bc.module.@"asm" = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        self.bc.module.@"asm" = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .MODULE_CODE_SECTIONNAME => {
-                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                         try self.appendOne([]const u8, &self.bc.module.section_name, name);
                     },
                     .MODULE_CODE_DEPLIB => {
-                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                         try self.appendOne([]const u8, &self.bc.module.deplib, name);
                     },
                     .MODULE_CODE_ALIAS => {
@@ -260,7 +266,7 @@ fn Parser(comptime Walker: type) type {
                         try self.appendOne(A, &self.bc.module.aliases, a);
                     },
                     .MODULE_CODE_GCNAME => {
-                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                         try self.appendOne([]const u8, &self.bc.module.gc_name, name);
                     },
                     _ => std.log.warn("unknown module record code {}", .{code}),
@@ -291,7 +297,7 @@ fn Parser(comptime Walker: type) type {
                             return error.InvalidBitcode;
                         }
                         const count = try self.parseOp(usize);
-                        self.bc.module.type.entries = try self.gpa.alloc(Bitcode.Module.Type.Entry, count);
+                        self.bc.module.type.entries = try self.arena.allocator().alloc(Bitcode.Module.Type.Entry, count);
                     },
                     .TYPE_CODE_VOID => try self.appendTypeDefinition(.void),
                     .TYPE_CODE_FLOAT => try self.appendTypeDefinition(.float),
@@ -331,24 +337,24 @@ fn Parser(comptime Walker: type) type {
                         try self.appendTypeDefinition(.{ .@"struct" = .{
                             .name = null,
                             .is_packed = try self.parseOp(bool),
-                            .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.gpa)).?,
+                            .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
                         } });
                     },
                     .TYPE_CODE_STRUCT_NAME => {
-                        self.found.pending_type_name = (try self.walker.remainingRecordValuesAlloc(u8, self.gpa)).?;
+                        self.found.pending_type_name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .TYPE_CODE_STRUCT_NAMED => {
                         try self.appendTypeDefinitionNamed(.{ .@"struct" = .{
                             .name = undefined,
                             .is_packed = try self.parseOp(bool),
-                            .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.gpa)).?,
+                            .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
                         } });
                     },
                     .TYPE_CODE_FUNCTION => {
                         try self.appendTypeDefinition(.{ .function = .{
                             .is_vararg = try self.parseOp(bool),
                             .return_type_index = try self.parseOp(u32),
-                            .param_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.gpa)).?,
+                            .param_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
                         } });
                     },
                     .TYPE_CODE_BFLOAT => try self.appendTypeDefinition(.bfloat),
@@ -458,7 +464,7 @@ fn Parser(comptime Walker: type) type {
 
         fn appendOne(self: *Self, comptime T: type, slice: *[]T, val: T) !void {
             const len = slice.len;
-            slice.* = try self.gpa.realloc(slice.*, len + 1);
+            slice.* = try self.arena.allocator().realloc(slice.*, len + 1);
             slice.*[len] = val;
         }
     };

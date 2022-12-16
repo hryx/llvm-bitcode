@@ -90,6 +90,9 @@ pub const Module = struct {
         MODULE_CODE_ALIAS,
 
         MODULE_CODE_GCNAME = 11,
+        // MODULE_CODE_COMDAT,
+        // MODULE_CODE_VSTOFFSET,
+        // MODULE_CODE_ALIAS,
 
         MODULE_CODE_SOURCE_FILENAME = 16,
 
@@ -400,7 +403,12 @@ pub const Module = struct {
     };
 
     pub const ParamAttr = struct {
-        // TODO
+        attr_group_indexes: []u32 = &.{},
+
+        pub const Code = enum(u32) {
+            PARAMATTR_CODE_ENTRY = 2,
+            _,
+        };
     };
 
     pub const GlobalVar = struct {
@@ -569,16 +577,23 @@ pub const Constant = struct {
     type_index: u32,
     value: Value,
 
+    /// TODO: For now, these just store raw bits
     pub const Value = union(enum) {
-        undef: Type,
-        null: Type,
-        int: i64,
-        wide_int: std.math.big.int.Const,
+        undef,
+        null,
+        int: u64,
+        wide_int: []u64,
+        float: u64,
+        aggregate: []u64, // TODO are these indexes or values?
+        string: []u8,
+        cstring: []u8,
+
+        pub const jsonStringify = todoJsonStringify(@This());
     };
 
-    pub const Type = union(enum) {
-        // TODO
-    };
+    // TODO: For now, just store the associated type index.
+    // Later, consider resolving and storing the type from the index.
+    pub const Type = u32;
 
     pub const Code = enum(u5) {
         CST_CODE_SETTYPE = 1, // sets type of constant (type_list[idx]), needs to be followed by another rec val

@@ -99,11 +99,11 @@ fn Parser(comptime Walker: type) type {
                     .MODULE_BLOCK_ID => try self.parseModuleBlock(),
                     .TYPE_BLOCK_ID => try self.parseTypeBlock(),
                     .STRTAB_BLOCK_ID => try self.parseStrtabBlock(),
+                    .FUNCTION_BLOCK_ID => return error.TODO,
                     .MODULE_STRTAB_BLOCK_ID,
                     .PARAMATTR_BLOCK_ID,
                     .PARAMATTR_GROUP_BLOCK_ID,
                     .CONSTANTS_BLOCK_ID,
-                    .FUNCTION_BLOCK_ID,
                     .VALUE_SYMTAB_BLOCK_ID,
                     .METADATA_BLOCK_ID,
                     .METADATA_ATTACHMENT_ID,
@@ -114,7 +114,15 @@ fn Parser(comptime Walker: type) type {
                     .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
                     .SYMTAB_BLOCK_ID,
                     .SYNC_SCOPE_NAMES_BLOCK_ID,
-                    => return error.TODO,
+                    => {
+                        std.log.err("TODO: {}", .{@intToEnum(Bitcode.BlockId, block_id)});
+                        while (try self.walker.next()) |todo| switch (todo) {
+                            .enter_block => unreachable,
+                            .end_block => break,
+                            .record => {},
+                        };
+                    },
+                    // => return error.TODO,
                     _ => return error.InvalidBitcode,
                 }
             }
@@ -143,7 +151,7 @@ fn Parser(comptime Walker: type) type {
             self.found.module = true;
             while (try self.walker.next()) |item| switch (item) {
                 .enter_block => |block_id| switch (@intToEnum(Bitcode.BlockId, block_id)) {
-                    .PARAMATTR_BLOCK_ID => try self.parseParamAttrBlock(),
+                    .PARAMATTR_BLOCK_ID => try self.parseParamAttrBlock(&self.bc.module.param_attr),
                     .PARAMATTR_GROUP_BLOCK_ID => try self.parseParamAttrGroupBlock(),
                     .TYPE_BLOCK_ID => try self.parseTypeBlock(),
                     .VALUE_SYMTAB_BLOCK_ID => try self.parseValueSymtabBlock(),
@@ -153,7 +161,9 @@ fn Parser(comptime Walker: type) type {
                     },
                     .FUNCTION_BLOCK_ID => try self.parseFunctionBlock(),
                     .METADATA_BLOCK_ID => try self.parseMetadataBlock(),
-                    .METADATA_ATTACHMENT_ID => try self.parseMetadataAttachmentBlock(),
+                    .METADATA_ATTACHMENT_ID,
+                    .METADATA_KIND_BLOCK_ID,
+                    => std.log.err("TODO: {}", .{@intToEnum(Bitcode.BlockId, block_id)}),
                     else => return error.InvalidBitcode,
                 },
                 .end_block => return,
@@ -396,9 +406,24 @@ fn Parser(comptime Walker: type) type {
             }
         }
 
-        fn parseParamAttrBlock(self: *Self) !void {
-            _ = self;
-            return error.TODO;
+        fn parseParamAttrBlock(self: *Self, dst: *Bitcode.Module.ParamAttr) !void {
+            var indexes = ArrayList(u32).init(self.arena.allocator());
+            while (try self.walker.next()) |item| switch (item) {
+                .enter_block => return error.InvalidBitcode,
+                .end_block => break,
+                .record => |code| switch (@intToEnum(Bitcode.Module.ParamAttr.Code, code)) {
+                    .PARAMATTR_CODE_ENTRY => {
+                        while (try self.walker.nextRecordValue(u32)) |idx| {
+                            try indexes.append(idx);
+                        }
+                    },
+                    _ => return error.InvalidBitcode,
+                },
+            } else unreachable;
+            const attr = Bitcode.Module.ParamAttr{
+                .attr_group_indexes = try indexes.toOwnedSlice(),
+            };
+            dst.* = attr;
         }
 
         fn parseParamAttrGroupBlock(self: *Self) !void {
@@ -562,10 +587,64 @@ fn Parser(comptime Walker: type) type {
             return error.TODO;
         }
 
-        fn parseConstantsBlock(self: *Self, constants: *[]Bitcode.Constant) !void {
-            _ = self;
-            _ = constants;
-            return error.TODO;
+        fn parseConstantsBlock(self: *Self, dst: *[]Bitcode.Constant) !void {
+            var constants = ArrayList(Bitcode.Constant).init(self.arena.allocator());
+            _ = dst;
+            var next_type_index: ?u32 = null;
+            while (try self.walker.next()) |item| switch (item) {
+                .enter_block => return error.InvalidBitcode,
+                .end_block => return,
+                .record => |code| {
+                    const rc = @intToEnum(Bitcode.Constant.Code, code);
+                    switch (rc) {
+                        .CST_CODE_SETTYPE => {
+                            next_type_index = try self.parseOp(u32);
+                            continue;
+                        },
+                        else => {},
+                    }
+                    if (next_type_index == null) return error.InvalidBitcode;
+                    const val: Bitcode.Constant.Value = switch (rc) {
+                        .CST_CODE_SETTYPE => unreachable,
+                        .CST_CODE_NULL => .null,
+                        .CST_CODE_UNDEF => .undef,
+                        .CST_CODE_INTEGER => .{ .int = try self.parseOp(u64) },
+                        .CST_CODE_WIDE_INTEGER => val: {
+                            // TODO
+                            break :val .{ .wide_int = (try self.walker.remainingRecordValuesAlloc(u64, self.arena.allocator())).? };
+                        },
+                        .CST_CODE_FLOAT => .{ .float = try self.parseOp(u64) },
+                        .CST_CODE_AGGREGATE => .{ .aggregate = (try self.walker.remainingRecordValuesAlloc(u64, self.arena.allocator())).? },
+                        .CST_CODE_STRING => .{ .string = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).? },
+                        .CST_CODE_CSTRING => .{ .cstring = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).? },
+                        .CST_CODE_CE_BINOP,
+                        .CST_CODE_CE_CAST,
+                        .CST_CODE_CE_GEP,
+                        .CST_CODE_CE_SELECT,
+                        .CST_CODE_CE_EXTRACTELT,
+                        .CST_CODE_CE_INSERTELT,
+                        .CST_CODE_CE_SHUFFLEVEC,
+                        .CST_CODE_CE_CMP,
+                        .CST_CODE_INLINEASM_OLD,
+                        .CST_CODE_CE_SHUFVEC_EX,
+                        .CST_CODE_CE_INBOUNDS_GEP,
+                        .CST_CODE_BLOCKADDRESS,
+                        .CST_CODE_DATA,
+                        .CST_CODE_INLINEASM_OLD2,
+                        .CST_CODE_CE_GEP_WITH_INRANGE_INDEX,
+                        .CST_CODE_CE_UNOP,
+                        .CST_CODE_POISON,
+                        .CST_CODE_DSO_LOCAL_EQUIVALENT,
+                        .CST_CODE_INLINEASM_OLD3,
+                        .CST_CODE_NO_CFI_VALUE,
+                        .CST_CODE_INLINEASM,
+                        => return error.TODO,
+                        _ => return error.InvalidBitcode,
+                    };
+                    try constants.append(.{ .type_index = next_type_index.?, .value = val });
+                },
+            };
+            if (next_type_index != null) return error.InvalidBitcode;
         }
 
         fn parseFunctionBlock(self: *Self) !void {

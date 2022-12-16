@@ -190,19 +190,125 @@ pub const Module = struct {
             attrs: []Attr,
 
             pub const ParamIdx = union(enum) {
-                return_value_attributes,
-                function_attributes,
-                function_param_attributes: u32,
+                return_value,
+                function,
+                function_param: u32,
+
+                pub const Code = enum(u32) {
+                    return_value_attributes = 0,
+                    function_attributes = 0xffffffff,
+                    _,
+
+                    pub fn toParamIdx(self: ParamIdx.Code) ParamIdx {
+                        return switch (self) {
+                            .return_value_attributes => .return_value,
+                            .function_attributes => .function,
+                            _ => |idx| .{ .function_param = @enumToInt(idx) - 1 },
+                        };
+                    }
+                };
 
                 pub const jsonStringify = defaultEnumJsonStringify(@This());
             };
 
-            pub const Attr = struct {
+            pub const Attr = union(enum) {
+                well_known: union(Kind.WellKnown) {
+                    @"align": u32,
+                    alwaysinline,
+                    byval,
+                    inlinehint,
+                    inreg,
+                    minsize,
+                    naked,
+                    nest,
+                    @"noalias",
+                    nobuiltin,
+                    nocapture,
+                    nodeduplicate,
+                    noimplicitfloat,
+                    @"noinline",
+                    nonlazybind,
+                    noredzone,
+                    noreturn,
+                    nounwind,
+                    optsize,
+                    readnone,
+                    readonly,
+                    returned,
+                    returns_twice,
+                    signext,
+                    alignstack: u32,
+                    ssp,
+                    sspreq,
+                    sspstrong,
+                    sret,
+                    sanitize_address,
+                    sanitize_thread,
+                    sanitize_memory,
+                    uwtable,
+                    zeroext,
+                    builtin,
+                    cold,
+                    optnone,
+                    inalloca,
+                    nonnull,
+                    jumptable,
+                    dereferenceable: u32,
+                    dereferenceable_or_null: u32,
+                    convergent,
+                    safestack,
+                    argmemonly,
+                    swiftself,
+                    swifterror,
+                    norecurse,
+                    inaccessiblememonly,
+                    inaccessiblememonly_or_argmemonly,
+                    allocsize: struct {
+                        elem_size: u32,
+                        num_elems: ?u32,
+                    },
+                    writeonly,
+                    speculatable,
+                    strictfp,
+                    sanitize_hwaddress,
+                    nocf_check,
+                    optforfuzzing,
+                    shadowcallstack,
+                    speculative_load_hardening,
+                    immarg,
+                    willreturn,
+                    nofree,
+                    nosync,
+                    sanitize_memtag,
+                    preallocated,
+                    no_merge,
+                    null_pointer_is_valid,
+                    noundef,
+                    byref,
+                    mustprogress,
+                    vscale_range: struct {
+                        min: u32,
+                        max: ?u32,
+                    },
+                    swiftasync,
+                    nosanitize_coverage,
+                    elementtype,
+                    disable_sanitizer_instrumentation,
+                    nosanitize_bounds,
+                },
+                custom: struct {
+                    attr: []const u8,
+                    value: ?[]const u8,
+                },
+
+                pub const jsonStringify = todoJsonStringify(@This());
+
                 pub const Kind = enum(u3) {
                     well_known = 0,
                     well_known_with_value = 1,
                     string = 3,
                     string_with_value = 4,
+                    _,
 
                     pub const WellKnown = enum(u8) {
                         @"align" = 1,
@@ -289,6 +395,7 @@ pub const Module = struct {
 
         pub const Code = enum(u32) {
             PARAMATTR_GRP_CODE_ENTRY = 3,
+            _,
         };
     };
 
@@ -512,6 +619,14 @@ fn defaultEnumJsonStringify(comptime T: type) fn (T, std.json.StringifyOptions, 
     return struct {
         pub fn stringify(self: T, opts: std.json.StringifyOptions, w: anytype) !void {
             try std.json.stringify(@tagName(self), opts, w);
+        }
+    }.stringify;
+}
+
+fn todoJsonStringify(comptime T: type) fn (T, std.json.StringifyOptions, anytype) anyerror!void {
+    return struct {
+        pub fn stringify(_: T, _: std.json.StringifyOptions, w: anytype) !void {
+            _ = try w.write("\"TODO\"");
         }
     }.stringify;
 }

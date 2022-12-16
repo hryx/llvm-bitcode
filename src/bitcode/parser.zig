@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const ArrayList = std.ArrayList;
 
 const bitstream = @import("../bitstream.zig");
 const codes = bitstream.codes;
@@ -72,6 +73,7 @@ fn Parser(comptime Walker: type) type {
             module: bool = false,
             identification: bool = false,
             strtab: bool = false,
+            param_attr_group: bool = false,
             type_entry_count: u32 = 0,
             pending_type_name: ?[]const u8 = null,
         } = .{},
@@ -400,8 +402,159 @@ fn Parser(comptime Walker: type) type {
         }
 
         fn parseParamAttrGroupBlock(self: *Self) !void {
-            _ = self;
-            return error.TODO;
+            if (self.found.param_attr_group) return error.InvalidBitcode;
+            self.found.param_attr_group = true;
+            const P = Bitcode.Module.ParamAttrGroup;
+            while (try self.walker.next()) |item| switch (item) {
+                .enter_block => {},
+                .end_block => break,
+                .record => |code| switch (@intToEnum(P.Code, code)) {
+                    .PARAMATTR_GRP_CODE_ENTRY => try self.parseParamAttrGroupEntry(),
+                    _ => std.log.warn("unknown param attr group code {}", .{code}),
+                },
+            } else unreachable;
+        }
+
+        fn parseParamAttrGroupEntry(self: *Self) !void {
+            const P = Bitcode.Module.ParamAttrGroup;
+            var entry = P.Entry{
+                .group_id = try self.parseOp(u32),
+                .param_idx = (try self.parseOp(P.Entry.ParamIdx.Code)).toParamIdx(),
+                .attrs = undefined,
+            };
+
+            var attrs = ArrayList(P.Entry.Attr).init(self.arena.allocator());
+            while (try self.walker.nextRecordValue(u32)) |kind_code| {
+                const kind = @intToEnum(P.Entry.Attr.Kind, kind_code);
+                switch (kind) {
+                    .well_known => {
+                        const key = try self.parseOp(P.Entry.Attr.Kind.WellKnown);
+                        const attr: P.Entry.Attr = .{ .well_known = switch (key) {
+                            inline .alwaysinline,
+                            .byval,
+                            .inlinehint,
+                            .inreg,
+                            .minsize,
+                            .naked,
+                            .nest,
+                            .@"noalias",
+                            .nobuiltin,
+                            .nocapture,
+                            .nodeduplicate,
+                            .noimplicitfloat,
+                            .@"noinline",
+                            .nonlazybind,
+                            .noredzone,
+                            .noreturn,
+                            .nounwind,
+                            .optsize,
+                            .readnone,
+                            .readonly,
+                            .returned,
+                            .returns_twice,
+                            .signext,
+                            .ssp,
+                            .sspreq,
+                            .sspstrong,
+                            .sret,
+                            .sanitize_address,
+                            .sanitize_thread,
+                            .sanitize_memory,
+                            .uwtable,
+                            .zeroext,
+                            .builtin,
+                            .cold,
+                            .optnone,
+                            .inalloca,
+                            .nonnull,
+                            .jumptable,
+                            .convergent,
+                            .safestack,
+                            .argmemonly,
+                            .swiftself,
+                            .swifterror,
+                            .norecurse,
+                            .inaccessiblememonly,
+                            .inaccessiblememonly_or_argmemonly,
+                            .writeonly,
+                            .speculatable,
+                            .strictfp,
+                            .sanitize_hwaddress,
+                            .nocf_check,
+                            .optforfuzzing,
+                            .shadowcallstack,
+                            .speculative_load_hardening,
+                            .immarg,
+                            .willreturn,
+                            .nofree,
+                            .nosync,
+                            .sanitize_memtag,
+                            .preallocated,
+                            .no_merge,
+                            .null_pointer_is_valid,
+                            .noundef,
+                            .byref,
+                            .mustprogress,
+                            .swiftasync,
+                            .nosanitize_coverage,
+                            .elementtype,
+                            .disable_sanitizer_instrumentation,
+                            .nosanitize_bounds,
+                            => |val| val,
+                            else => return error.InvalidBitcode,
+                        } };
+                        try attrs.append(attr);
+                    },
+                    .well_known_with_value => {
+                        const key = try self.parseOp(P.Entry.Attr.Kind.WellKnown);
+                        const attr: P.Entry.Attr = .{ .well_known = switch (key) {
+                            .@"align" => .{ .@"align" = try self.parseOp(u32) },
+                            .alignstack => .{ .alignstack = try self.parseOp(u32) },
+                            .dereferenceable => .{ .dereferenceable = try self.parseOp(u32) },
+                            .dereferenceable_or_null => .{ .dereferenceable_or_null = try self.parseOp(u32) },
+                            .allocsize => b: {
+                                const val = try self.parseOp(u64);
+                                const elem_size = @intCast(u32, val >> 32);
+                                const num_elems = @truncate(u32, val);
+                                break :b .{ .allocsize = .{
+                                    .elem_size = elem_size,
+                                    .num_elems = if (num_elems == std.math.maxInt(u32)) null else num_elems,
+                                } };
+                            },
+                            .vscale_range => b: {
+                                const val = try self.parseOp(u64);
+                                const min = @intCast(u32, val >> 32);
+                                const max = @truncate(u32, val);
+                                break :b .{ .vscale_range = .{
+                                    .min = min,
+                                    .max = if (max == std.math.maxInt(u32)) null else max,
+                                } };
+                            },
+                            else => return error.InvalidBitcode,
+                        } };
+                        try attrs.append(attr);
+                    },
+                    .string => {
+                        const key = try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator()) orelse return error.InvalidBitcode;
+                        const attr = P.Entry.Attr{ .custom = .{ .attr = key, .value = null } };
+                        try attrs.append(attr);
+                    },
+                    .string_with_value => {
+                        const kv = try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator()) orelse return error.InvalidBitcode;
+                        const key_end = std.mem.indexOfScalar(u8, kv, 0) orelse return error.InvalidBitcode;
+                        if (key_end + 2 > kv.len) return error.InvalidBitcode;
+                        const key = kv[0..key_end];
+                        const val_end = (std.mem.indexOfScalar(u8, kv[key_end + 1 ..], 0) orelse return error.InvalidBitcode) + key_end;
+                        const val = kv[key_end + 1 .. val_end];
+                        const attr = P.Entry.Attr{ .custom = .{ .attr = key, .value = val } };
+                        try attrs.append(attr);
+                    },
+                    _ => return error.InvalidBitcode,
+                }
+            }
+            entry.attrs = try attrs.toOwnedSlice();
+
+            try self.appendOne(P.Entry, &self.bc.module.param_attr_group.entries, entry);
         }
 
         fn parseValueSymtabBlock(self: *Self) !void {

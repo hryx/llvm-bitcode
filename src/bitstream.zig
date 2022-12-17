@@ -9,6 +9,7 @@ const w = @import("bitstream/walker.zig");
 pub const walker = w.walker;
 pub const Walker = w.Walker;
 pub const WalkerOptions = w.WalkerOptions;
+pub const WalkError = w.WalkError;
 
 pub fn decodeChar6(c: u6) u8 {
     return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[c];
@@ -63,7 +64,8 @@ pub fn Reader(comptime ReaderType: type) type {
 
         const Self = @This();
         const BitReaderType = io.BitReader(.Little, ReaderType);
-        const Error = BitstreamError || BitReaderType.Error;
+        // pub const Error = BitstreamError || BitReaderType.Error;
+        pub const Error = error{ EndOfStream, InvalidBitstream };
 
         pub fn init(unberlying_reader: ReaderType) Self {
             return Self{
@@ -77,7 +79,7 @@ pub fn Reader(comptime ReaderType: type) type {
         /// `width` is the number of bits in each VBR chunk, which is application-specific.
         ///
         /// Individual VBR chunks can max 32 bits wide, hence width is a u5.
-        pub fn readVbr(self: *Self, comptime T: type, width: u5) !T {
+        pub fn readVbr(self: *Self, comptime T: type, width: u5) error{EndOfStream}!T {
             const t_info = @typeInfo(T).Int;
             assert(t_info.bits <= 64 and t_info.signedness == .unsigned);
             assert(width > 0);
@@ -106,7 +108,7 @@ pub fn Reader(comptime ReaderType: type) type {
         /// Read a fixed-width integer, returning it as a T.
         /// `T` must be an unsigned integer type no larger than u64.
         /// `width` is the number of bits in the value's encoding, which is application-specific.
-        pub fn readInt(self: *Self, comptime T: type, width: u6) !T {
+        pub fn readInt(self: *Self, comptime T: type, width: u6) error{EndOfStream}!T {
             const t_info = @typeInfo(T).Int;
             assert(t_info.bits <= 64 and t_info.signedness == .unsigned);
             assert(width > 0);
@@ -119,13 +121,13 @@ pub fn Reader(comptime ReaderType: type) type {
         /// Read a fixed-width integer, returning it as a T.
         /// Width of the fixed field is inferred from T;
         /// to read an int with a runtime-known width, use `readInt`.
-        pub fn readIntAuto(self: *Self, comptime T: type) !T {
+        pub fn readIntAuto(self: *Self, comptime T: type) error{EndOfStream}!T {
             const bits = @typeInfo(T).Int.bits;
             return self.readInt(T, bits);
         }
 
         /// Read a 6-bit encoded character, returning it as an ASCII character.
-        pub fn readChar6(self: *Self) !u8 {
+        pub fn readChar6(self: *Self) error{EndOfStream}!u8 {
             const val = try self.bit_reader.readBitsNoEof(u6, 6);
             self.pos += 6;
             return decodeChar6(val);
@@ -134,7 +136,7 @@ pub fn Reader(comptime ReaderType: type) type {
         /// Read the "magic" header at the start of a bitstream.
         /// Asserts that this is only called at the start of a bitstream.
         /// Does not validate the contents of the magic bytes.
-        pub fn readMagic(self: *Self) ![4]u8 {
+        pub fn readMagic(self: *Self) error{EndOfStream}![4]u8 {
             assert(self.pos == 0);
             var buf: [4]u8 = undefined;
             try self.bit_reader.reader().readNoEof(&buf);
@@ -146,7 +148,7 @@ pub fn Reader(comptime ReaderType: type) type {
         /// Caller must keep track of the ID width for the given block scope,
         /// which is determined by the block's header.
         /// For the outermost scope, always use an abbeviation width of 2.
-        pub fn readAbbrevId(self: *Self, width: u5) !codes.abbrev.Id {
+        pub fn readAbbrevId(self: *Self, width: u5) error{EndOfStream}!codes.abbrev.Id {
             const id = try self.readInt(u32, width);
             return @intToEnum(codes.abbrev.Id, id);
         }
@@ -160,7 +162,7 @@ pub fn Reader(comptime ReaderType: type) type {
         /// - If this returns .array, there is exactly one more operand following it,
         ///   and the final operand is a fixed, vbr, or char6.
         /// - If this returns .blob, there are zero more operands.
-        pub fn readAbbrevOp(self: *Self) !AbbrevOp {
+        pub fn readAbbrevOp(self: *Self) error{ EndOfStream, InvalidBitstream }!AbbrevOp {
             const is_literal = try self.readIntAuto(u1) == 1;
             if (is_literal) {
                 const value = try self.readVbr(u64, 8);
@@ -178,7 +180,7 @@ pub fn Reader(comptime ReaderType: type) type {
             }
         }
 
-        pub fn readSubBlockHeader(self: *Self) !BlockHeader {
+        pub fn readSubBlockHeader(self: *Self) error{EndOfStream}!BlockHeader {
             const block_id = try self.readVbr(u32, 8);
             const abbrev_width = try self.readVbr(u5, 4);
             try self.alignToWord();
@@ -190,21 +192,21 @@ pub fn Reader(comptime ReaderType: type) type {
             };
         }
 
-        pub fn endBlock(self: *Self) !void {
+        pub fn endBlock(self: *Self) error{EndOfStream}!void {
             try self.alignToWord();
         }
 
         /// If the cursor is at a position which is not a multiple of 32,
         /// moves it to the next 32-bit aligned position.
         /// The bitstream format pads information with zeroes up to 32-bit boundaries in some cases.
-        pub fn alignToWord(self: *Self) !void {
+        pub fn alignToWord(self: *Self) error{EndOfStream}!void {
             const off = self.pos % 32;
             if (off != 0) {
                 try self.skipBits(32 - off);
             }
         }
 
-        pub fn skipBits(self: *Self, bits: usize) !void {
+        pub fn skipBits(self: *Self, bits: usize) error{EndOfStream}!void {
             const skip_bytes = bits / 8;
             try self.bit_reader.reader().skipBytes(skip_bytes, .{});
             const diff = @intCast(u3, bits % 8);
@@ -212,7 +214,7 @@ pub fn Reader(comptime ReaderType: type) type {
             self.pos += bits;
         }
 
-        pub fn skipWords(self: *Self, count: u32) !void {
+        pub fn skipWords(self: *Self, count: u32) error{EndOfStream}!void {
             try self.skipBits(@as(usize, count) * 32);
         }
     };

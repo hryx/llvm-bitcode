@@ -11,24 +11,60 @@ const Bitcode = @import("../Bitcode.zig");
 
 pub const Result = union(enum) {
     success: Bitcode,
-    failure: []ParseError,
-};
+    failure: Error,
 
-pub const ParseError = struct {
-    pos: usize,
-    err: union(enum) {
-        unknown_block_id: u32,
-        unknown_record_code: struct {
-            code: u32,
-            in_block: Bitcode.BlockId,
-        },
-        duplicate_block: Bitcode.BlockId,
-    },
+    pub const Error = struct {
+        bit_pos: usize,
+        // in_block: ?Bitcode.BlockId,
+        kind: Kind,
 
-    pub fn format(e: ParseError) void {
-        _ = e;
-        @panic("TODO");
-    }
+        pub const Kind = union(enum) {
+            invalid_bitstream: bitstream.WalkError,
+            magic,
+            overflow,
+            end_of_stream,
+            end_of_record,
+            unexpected_sub_block_in: Bitcode.BlockId,
+            unexpected_block_id: Bitcode.BlockId,
+            unexpected_block_id_in: struct {
+                id: Bitcode.BlockId,
+                in: Bitcode.BlockId,
+            },
+            unknown_block_id: u32,
+            unknown_record_code: u32,
+            duplicate_block: Bitcode.BlockId,
+            module_duplicate_record: Bitcode.Module.Code,
+            module_version: u8,
+            type_duplicate_num_entry,
+            type_no_pending_name,
+            type_too_many_entries: u32, // expected count
+        };
+
+        pub fn render(err: Error, writer: anytype) !void {
+            const byte = err.bit_pos / 8;
+            const bit_off = err.bit_pos % 8;
+            try writer.print("bit {} (0x{x:0>4}+{}): ", .{ err.bit_pos, byte, bit_off });
+            // try writer.print("in block {s}: ", .{if (err.in_block) |b| @tagName(b) else "(top)"});
+            switch (err.kind) {
+                .invalid_bitstream => |we| try we.render(writer),
+                .magic => try writer.print("magic header bytes do not identify stream as bitcode", .{}),
+                .overflow => try writer.print("integer overflowed while parsing", .{}),
+                .end_of_stream => try writer.print("unexpected end of bitstream", .{}),
+                .end_of_record => try writer.print("expected more values when parsing record", .{}),
+                .unexpected_sub_block_in => |in| try writer.print("unexpected sub-block in {s}", .{@tagName(in)}),
+                .unexpected_block_id => |id| try writer.print("unexpected sub-block {s}", .{@tagName(id)}),
+                .unexpected_block_id_in => |e| try writer.print("unexpected sub-block {s} in parent {s}", .{ @tagName(e.id), @tagName(e.in) }),
+                .unknown_block_id => |id| try writer.print("unknown sub-block ID {}", .{id}),
+                .unknown_record_code => |id| try writer.print("unknown record code {}", .{id}),
+                .duplicate_block => |id| try writer.print("unexpected duplicate block {s}", .{@tagName(id)}),
+                .module_duplicate_record => |code| try writer.print("duplicate module record {s}", .{@tagName(code)}),
+                .module_version => |v| try writer.print("unsupported module version {}", .{v}),
+                .type_duplicate_num_entry => try writer.print("duplicate TYPE_NUMENTRY records", .{}),
+                .type_no_pending_name => try writer.print("tried to define a named struct/opaque with no name", .{}),
+                .type_too_many_entries => |count| try writer.print("more TYPE entries than expected ({})", .{count}),
+            }
+        }
+    };
 };
 
 pub fn parse(gpa: Allocator, src: []const u8) !Result {
@@ -40,17 +76,22 @@ pub fn parse(gpa: Allocator, src: []const u8) !Result {
 
     const magic = try walker.readMagic();
     if (!std.mem.eql(u8, &magic, &Bitcode.magic)) {
-        return error.NotBitcode; // TODO
+        return Result{ .failure = .{ .bit_pos = walker.r.pos, .kind = .magic } };
     }
 
     var p = parser(&walker, gpa);
     errdefer p.deinit();
-    p.parse() catch |err| switch (err) {
-        // TODO: append error and return Result
-        // error.EndOfStream => {},
-        // error.EndOfRecord => {},
-        // error.Overflow => {},
-        else => return err,
+    p.parse() catch |err| return Result{
+        .failure = .{
+            .bit_pos = walker.r.pos,
+            .kind = switch (err) {
+                error.EndOfStream => .end_of_stream,
+                error.InvalidBitstream => .{ .invalid_bitstream = walker.err.? },
+                // error.Overflow => .overflow,
+                error.InvalidBitcode => p.err,
+                else => return err,
+            },
+        },
     };
 
     return Result{ .success = p.bc };
@@ -77,6 +118,7 @@ fn Parser(comptime Walker: type) type {
             type_entry_count: u32 = 0,
             pending_type_name: ?[]const u8 = null,
         } = .{},
+        err: Result.Error.Kind = undefined,
 
         const Self = @This();
 
@@ -91,6 +133,14 @@ fn Parser(comptime Walker: type) type {
             self.arena.deinit();
         }
 
+        fn parseError(self: *Self, err: Result.Error.Kind) error{InvalidBitcode}!noreturn {
+            self.err = err;
+            return error.InvalidBitcode;
+        }
+
+        const WalkerError = @typeInfo(Walker).Pointer.child.Error;
+        const Error = error{InvalidBitcode} || WalkerError;
+
         fn parse(self: *Self) !void {
             while (try self.walker.next()) |item| {
                 const block_id = item.enter_block; // .record is unreachable at top level
@@ -99,7 +149,7 @@ fn Parser(comptime Walker: type) type {
                     .MODULE_BLOCK_ID => try self.parseModuleBlock(),
                     .TYPE_BLOCK_ID => try self.parseTypeBlock(),
                     .STRTAB_BLOCK_ID => try self.parseStrtabBlock(),
-                    .FUNCTION_BLOCK_ID => return error.TODO,
+                    .FUNCTION_BLOCK_ID => @panic("TODO"),
                     .MODULE_STRTAB_BLOCK_ID,
                     .PARAMATTR_BLOCK_ID,
                     .PARAMATTR_GROUP_BLOCK_ID,
@@ -123,16 +173,19 @@ fn Parser(comptime Walker: type) type {
                         };
                     },
                     // => return error.TODO,
-                    _ => return error.InvalidBitcode,
+                    _ => return try self.parseError(.{ .unknown_block_id = block_id }),
                 }
             }
         }
 
-        fn parseIdentificationBlock(self: *Self) !void {
-            if (self.found.identification) return error.InvalidBitcode;
+        fn parseIdentificationBlock(self: *Self) Error!void {
+            if (self.found.identification) {
+                return try self.parseError(.{ .duplicate_block = .IDENTIFICATION_BLOCK_ID });
+            }
             self.found.identification = true;
+
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return error.InvalidBitcode,
+                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .IDENTIFICATION_BLOCK_ID }),
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Idendification.Code, code)) {
                     .IDENTIFICATION_CODE_STRING => {
@@ -141,14 +194,17 @@ fn Parser(comptime Walker: type) type {
                     .IDENTIFICATION_CODE_EPOCH => {
                         self.bc.identification.epoch = try self.parseOp(u0);
                     },
-                    _ => std.log.warn("unknown identification record code {}", .{code}),
+                    _ => return try self.parseError(.{ .unknown_record_code = code }),
                 },
             } else unreachable;
         }
 
-        fn parseModuleBlock(self: *Self) !void {
-            if (self.found.module) return error.InvalidBitcode;
+        fn parseModuleBlock(self: *Self) Error!void {
+            if (self.found.module) {
+                return try self.parseError(.{ .duplicate_block = .MODULE_BLOCK_ID });
+            }
             self.found.module = true;
+
             while (try self.walker.next()) |item| switch (item) {
                 .enter_block => |block_id| switch (@intToEnum(Bitcode.BlockId, block_id)) {
                     .PARAMATTR_BLOCK_ID => try self.parseParamAttrBlock(&self.bc.module.param_attr),
@@ -164,7 +220,21 @@ fn Parser(comptime Walker: type) type {
                     .METADATA_ATTACHMENT_ID,
                     .METADATA_KIND_BLOCK_ID,
                     => std.log.err("TODO: {}", .{@intToEnum(Bitcode.BlockId, block_id)}),
-                    else => return error.InvalidBitcode,
+                    .MODULE_BLOCK_ID,
+                    .IDENTIFICATION_BLOCK_ID,
+                    .USELIST_BLOCK_ID,
+                    .MODULE_STRTAB_BLOCK_ID,
+                    .GLOBALVAL_SUMMARY_BLOCK_ID,
+                    .OPERAND_BUNDLE_TAGS_BLOCK_ID,
+                    .STRTAB_BLOCK_ID,
+                    .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
+                    .SYMTAB_BLOCK_ID,
+                    .SYNC_SCOPE_NAMES_BLOCK_ID,
+                    => return try self.parseError(.{ .unexpected_block_id_in = .{
+                        .id = @intToEnum(Bitcode.BlockId, block_id),
+                        .in = .MODULE_BLOCK_ID,
+                    } }),
+                    _ => return try self.parseError(.{ .unknown_block_id = block_id }),
                 },
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Module.Code, code)) {
@@ -220,35 +290,36 @@ fn Parser(comptime Walker: type) type {
                     },
                     .MODULE_CODE_VERSION => {
                         if (self.bc.module.version != 0) {
-                            return error.InvalidBitcode;
+                            return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_VERSION });
                         }
-                        const version = try self.parseOp(u2);
+                        const version = try self.parseOp(u8);
                         if (version != 2) {
-                            return error.InvalidBitcode; // Can only parse v2 for now
+                            // Can only parse v2 for now
+                            return try self.parseError(.{ .module_version = version });
                         }
-                        self.bc.module.version = version;
+                        self.bc.module.version = @intCast(u2, version);
                     },
                     .MODULE_CODE_TRIPLE => {
                         if (self.bc.module.triple.len != 0) {
-                            return error.InvalidBitcode;
+                            return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_TRIPLE });
                         }
                         self.bc.module.triple = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .MODULE_CODE_DATALAYOUT => {
                         if (self.bc.module.data_layout.len != 0) {
-                            return error.InvalidBitcode;
+                            return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_DATALAYOUT });
                         }
                         self.bc.module.data_layout = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .MODULE_CODE_SOURCE_FILENAME => {
                         if (self.bc.module.source_filename.len != 0) {
-                            return error.InvalidBitcode;
+                            return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_SOURCE_FILENAME });
                         }
                         self.bc.module.source_filename = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .MODULE_CODE_ASM => {
                         if (self.bc.module.@"asm".len != 0) {
-                            return error.InvalidBitcode;
+                            return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_ASM });
                         }
                         self.bc.module.@"asm" = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
@@ -281,32 +352,35 @@ fn Parser(comptime Walker: type) type {
                         const name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                         try self.appendOne([]const u8, &self.bc.module.gc_name, name);
                     },
-                    _ => std.log.warn("unknown module record code {}", .{code}),
+                    _ => return try self.parseError(.{ .unknown_record_code = code }),
                 },
             } else unreachable;
         }
 
-        fn parseStrtabBlock(self: *Self) !void {
-            if (self.found.strtab) return error.InvalidBitcode;
+        fn parseStrtabBlock(self: *Self) Error!void {
+            if (self.found.strtab) {
+                return try self.parseError(.{ .duplicate_block = .STRTAB_BLOCK_ID });
+            }
             self.found.strtab = true;
+
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return error.InvalidBitcode,
+                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .STRTAB_BLOCK_ID }),
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Strtab.Code, code)) {
                     .STRTAB_BLOB => self.bc.strtab.contents = (try self.walker.recordBlob()).?,
-                    _ => std.log.warn("unknown strtab code {}", .{code}),
+                    _ => return try self.parseError(.{ .unknown_record_code = code }),
                 },
             } else unreachable;
         }
 
-        fn parseTypeBlock(self: *Self) !void {
+        fn parseTypeBlock(self: *Self) Error!void {
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return error.InvalidBitcode,
+                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .TYPE_BLOCK_ID }),
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Module.Type.Code, code)) {
                     .TYPE_CODE_NUMENTRY => {
                         if (self.bc.module.type.entries.len != 0) {
-                            return error.InvalidBitcode;
+                            return try self.parseError(.type_duplicate_num_entry);
                         }
                         const count = try self.parseOp(usize);
                         self.bc.module.type.entries = try self.arena.allocator().alloc(Bitcode.Module.Type.Entry, count);
@@ -371,22 +445,22 @@ fn Parser(comptime Walker: type) type {
                     },
                     .TYPE_CODE_BFLOAT => try self.appendTypeDefinition(.bfloat),
                     .TYPE_CODE_X86_AMX => try self.appendTypeDefinition(.x86_amx),
-                    _ => std.log.warn("unknown type code {}", .{code}),
+                    _ => return try self.parseError(.{ .unknown_record_code = code }),
                 },
             } else unreachable;
         }
 
-        fn appendTypeDefinition(self: *Self, entry: Bitcode.Module.Type.Entry) !void {
+        fn appendTypeDefinition(self: *Self, entry: Bitcode.Module.Type.Entry) Error!void {
             if (self.found.type_entry_count == self.bc.module.type.entries.len) {
-                std.log.err("found too many type entries according to NUMENTRY", .{});
-                return error.InvalidBitcode;
+                return try self.parseError(.{ .type_too_many_entries = @intCast(u32, self.bc.module.type.entries.len) });
             }
             self.bc.module.type.entries[self.found.type_entry_count] = entry;
             self.found.type_entry_count += 1;
         }
 
-        fn appendTypeDefinitionNamed(self: *Self, entry: Bitcode.Module.Type.Entry) !void {
-            const name = self.found.pending_type_name orelse return error.InvalidBitcode;
+        fn appendTypeDefinitionNamed(self: *Self, entry: Bitcode.Module.Type.Entry) Error!void {
+            const name = self.found.pending_type_name orelse
+                return try self.parseError(.type_no_pending_name);
             defer self.found.pending_type_name = null;
 
             switch (entry) {
@@ -406,10 +480,10 @@ fn Parser(comptime Walker: type) type {
             }
         }
 
-        fn parseParamAttrBlock(self: *Self, dst: *Bitcode.Module.ParamAttr) !void {
+        fn parseParamAttrBlock(self: *Self, dst: *Bitcode.Module.ParamAttr) Error!void {
             var indexes = ArrayList(u32).init(self.arena.allocator());
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return error.InvalidBitcode,
+                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .PARAMATTR_BLOCK_ID }),
                 .end_block => break,
                 .record => |code| switch (@intToEnum(Bitcode.Module.ParamAttr.Code, code)) {
                     .PARAMATTR_CODE_ENTRY => {
@@ -426,12 +500,12 @@ fn Parser(comptime Walker: type) type {
             dst.* = attr;
         }
 
-        fn parseParamAttrGroupBlock(self: *Self) !void {
-            if (self.found.param_attr_group) return error.InvalidBitcode;
+        fn parseParamAttrGroupBlock(self: *Self) Error!void {
+            if (self.found.param_attr_group) return try self.parseError(.{ .duplicate_block = .PARAMATTR_GROUP_BLOCK_ID });
             self.found.param_attr_group = true;
             const P = Bitcode.Module.ParamAttrGroup;
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => {},
+                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .PARAMATTR_GROUP_BLOCK_ID }),
                 .end_block => break,
                 .record => |code| switch (@intToEnum(P.Code, code)) {
                     .PARAMATTR_GRP_CODE_ENTRY => try self.parseParamAttrGroupEntry(),
@@ -440,7 +514,7 @@ fn Parser(comptime Walker: type) type {
             } else unreachable;
         }
 
-        fn parseParamAttrGroupEntry(self: *Self) !void {
+        fn parseParamAttrGroupEntry(self: *Self) Error!void {
             const P = Bitcode.Module.ParamAttrGroup;
             var entry = P.Entry{
                 .group_id = try self.parseOp(u32),
@@ -582,17 +656,16 @@ fn Parser(comptime Walker: type) type {
             try self.appendOne(P.Entry, &self.bc.module.param_attr_group.entries, entry);
         }
 
-        fn parseValueSymtabBlock(self: *Self) !void {
+        fn parseValueSymtabBlock(self: *Self) Error!void {
             _ = self;
-            return error.TODO;
+            @panic("TODO");
         }
 
-        fn parseConstantsBlock(self: *Self, dst: *[]Bitcode.Constant) !void {
+        fn parseConstantsBlock(self: *Self, dst: *[]Bitcode.Constant) Error!void {
             var constants = ArrayList(Bitcode.Constant).init(self.arena.allocator());
-            _ = dst;
             var next_type_index: ?u32 = null;
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return error.InvalidBitcode,
+                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .CONSTANTS_BLOCK_ID }),
                 .end_block => return,
                 .record => |code| {
                     const rc = @intToEnum(Bitcode.Constant.Code, code);
@@ -638,31 +711,31 @@ fn Parser(comptime Walker: type) type {
                         .CST_CODE_INLINEASM_OLD3,
                         .CST_CODE_NO_CFI_VALUE,
                         .CST_CODE_INLINEASM,
-                        => return error.TODO,
-                        _ => return error.InvalidBitcode,
+                        => @panic("TODO"),
+                        _ => return try self.parseError(.{ .unknown_record_code = code }),
                     };
                     try constants.append(.{ .type_index = next_type_index.?, .value = val });
                 },
             };
-            if (next_type_index != null) return error.InvalidBitcode;
+            dst.* = try constants.toOwnedSlice();
         }
 
-        fn parseFunctionBlock(self: *Self) !void {
+        fn parseFunctionBlock(self: *Self) Error!void {
             _ = self;
-            return error.TODO;
+            @panic("TODO");
         }
 
-        fn parseMetadataBlock(self: *Self) !void {
+        fn parseMetadataBlock(self: *Self) Error!void {
             _ = self;
-            return error.TODO;
+            @panic("TODO");
         }
 
-        fn parseMetadataAttachmentBlock(self: *Self) !void {
+        fn parseMetadataAttachmentBlock(self: *Self) Error!void {
             _ = self;
-            return error.TODO;
+            @panic("TODO");
         }
 
-        fn parseOp(self: *Self, comptime T: type) !T {
+        fn parseOp(self: *Self, comptime T: type) Error!T {
             const info = @typeInfo(T);
             switch (info) {
                 .Enum => {
@@ -685,16 +758,16 @@ fn Parser(comptime Walker: type) type {
             }
         }
 
-        fn mustReadOp(self: *Self, comptime T: type) !T {
-            return (try self.walker.nextRecordValue(T)) orelse error.EndOfRecord;
+        fn mustReadOp(self: *Self, comptime T: type) Error!T {
+            return (try self.walker.nextRecordValue(T)) orelse try self.parseError(.end_of_record);
         }
 
-        fn parseOptionalIndex(self: *Self, comptime T: type) !?T {
+        fn parseOptionalIndex(self: *Self, comptime T: type) Error!?T {
             const x = try self.parseOp(T);
             return if (x == 0) null else x - 1;
         }
 
-        fn appendOne(self: *Self, comptime T: type, slice: *[]T, val: T) !void {
+        fn appendOne(self: *Self, comptime T: type, slice: *[]T, val: T) Error!void {
             const len = slice.len;
             slice.* = try self.arena.allocator().realloc(slice.*, len + 1);
             slice.*[len] = val;

@@ -87,14 +87,15 @@ pub const Module = struct {
         MODULE_CODE_DEPLIB,
         MODULE_CODE_GLOBALVAR,
         MODULE_CODE_FUNCTION,
-        MODULE_CODE_ALIAS,
 
         MODULE_CODE_GCNAME = 11,
-        // MODULE_CODE_COMDAT,
-        // MODULE_CODE_VSTOFFSET,
-        // MODULE_CODE_ALIAS,
+        MODULE_CODE_COMDAT,
+        MODULE_CODE_VSTOFFSET,
+        MODULE_CODE_ALIAS,
 
         MODULE_CODE_SOURCE_FILENAME = 16,
+        MODULE_CODE_HASH,
+        MODULE_CODE_IFUNC,
 
         _,
     };

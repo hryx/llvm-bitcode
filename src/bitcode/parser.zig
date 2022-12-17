@@ -370,6 +370,11 @@ fn Parser(comptime Walker: type) type {
                         const name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                         try self.appendOne([]const u8, &self.bc.module.gc_name, name);
                     },
+                    .MODULE_CODE_COMDAT,
+                    .MODULE_CODE_VSTOFFSET,
+                    .MODULE_CODE_HASH,
+                    .MODULE_CODE_IFUNC,
+                    => std.log.warn("TODO: module code {s}", .{@tagName(@intToEnum(Bitcode.Module.Code, code))}),
                     _ => return try self.parseError(.{ .unknown_record_code = code }),
                 },
             } else unreachable;

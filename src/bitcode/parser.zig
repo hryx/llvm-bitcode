@@ -15,7 +15,7 @@ pub const Result = union(enum) {
 
     pub const Error = struct {
         bit_pos: usize,
-        // in_block: ?Bitcode.BlockId,
+        in_block: ?Bitcode.BlockId,
         kind: Kind,
 
         pub const Kind = union(enum) {
@@ -38,13 +38,17 @@ pub const Result = union(enum) {
             type_duplicate_num_entry,
             type_no_pending_name,
             type_too_many_entries: u32, // expected count
+            constants_type_not_set,
+            param_attr_invalid_kind: Bitcode.Module.ParamAttrGroup.Entry.Attr.Kind,
+            param_attr_invalid_key: Bitcode.Module.ParamAttrGroup.Entry.Attr.Kind.WellKnown,
+            expected_nul_termination,
         };
 
         pub fn render(err: Error, writer: anytype) !void {
             const byte = err.bit_pos / 8;
             const bit_off = err.bit_pos % 8;
             try writer.print("bit {} (0x{x:0>4}+{}): ", .{ err.bit_pos, byte, bit_off });
-            // try writer.print("in block {s}: ", .{if (err.in_block) |b| @tagName(b) else "(top)"});
+            try writer.print("in block {s}: ", .{if (err.in_block) |b| @tagName(b) else "(top)"});
             switch (err.kind) {
                 .invalid_bitstream => |we| try we.render(writer),
                 .magic => try writer.print("magic header bytes do not identify stream as bitcode", .{}),
@@ -62,6 +66,10 @@ pub const Result = union(enum) {
                 .type_duplicate_num_entry => try writer.print("duplicate TYPE_NUMENTRY records", .{}),
                 .type_no_pending_name => try writer.print("tried to define a named struct/opaque with no name", .{}),
                 .type_too_many_entries => |count| try writer.print("more TYPE entries than expected ({})", .{count}),
+                .constants_type_not_set => try writer.print("type not set in CONSTANTS entry", .{}),
+                .param_attr_invalid_kind => |kind| try writer.print("invalid param kind {}", .{kind}),
+                .param_attr_invalid_key => |key| try writer.print("invalid well-known param attr {}", .{key}),
+                .expected_nul_termination => try writer.print("expected NUL-terminated string record", .{}),
             }
         }
     };
@@ -76,7 +84,11 @@ pub fn parse(gpa: Allocator, src: []const u8) !Result {
 
     const magic = try walker.readMagic();
     if (!std.mem.eql(u8, &magic, &Bitcode.magic)) {
-        return Result{ .failure = .{ .bit_pos = walker.r.pos, .kind = .magic } };
+        return Result{ .failure = .{
+            .bit_pos = walker.r.pos,
+            .in_block = null,
+            .kind = .magic,
+        } };
     }
 
     var p = parser(&walker, gpa);
@@ -84,11 +96,15 @@ pub fn parse(gpa: Allocator, src: []const u8) !Result {
     p.parse() catch |err| return Result{
         .failure = .{
             .bit_pos = walker.r.pos,
+            .in_block = if (p.walker.block_stack.items.len == 0) null else b: {
+                const id = p.walker.block_stack.items[p.walker.block_stack.items.len - 1].block_id;
+                break :b @intToEnum(Bitcode.BlockId, id);
+            },
             .kind = switch (err) {
                 error.EndOfStream => .end_of_stream,
                 error.InvalidBitstream => .{ .invalid_bitstream = walker.err.? },
                 // error.Overflow => .overflow,
-                error.InvalidBitcode => p.err,
+                error.InvalidBitcode => p.err.?,
                 else => return err,
             },
         },
@@ -118,7 +134,7 @@ fn Parser(comptime Walker: type) type {
             type_entry_count: u32 = 0,
             pending_type_name: ?[]const u8 = null,
         } = .{},
-        err: Result.Error.Kind = undefined,
+        err: ?Result.Error.Kind = null,
 
         const Self = @This();
 
@@ -212,7 +228,9 @@ fn Parser(comptime Walker: type) type {
                     .TYPE_BLOCK_ID => try self.parseTypeBlock(),
                     .VALUE_SYMTAB_BLOCK_ID => try self.parseValueSymtabBlock(),
                     .CONSTANTS_BLOCK_ID => {
-                        if (self.bc.module.constants.len > 0) return error.InvalidBitcode;
+                        if (self.bc.module.constants.len > 0) {
+                            return try self.parseError(.{ .duplicate_block = .CONSTANTS_BLOCK_ID });
+                        }
                         try self.parseConstantsBlock(&self.bc.module.constants);
                     },
                     .FUNCTION_BLOCK_ID => try self.parseFunctionBlock(),
@@ -491,7 +509,7 @@ fn Parser(comptime Walker: type) type {
                             try indexes.append(idx);
                         }
                     },
-                    _ => return error.InvalidBitcode,
+                    _ => return try self.parseError(.{ .unknown_record_code = code }),
                 },
             } else unreachable;
             const attr = Bitcode.Module.ParamAttr{
@@ -600,7 +618,7 @@ fn Parser(comptime Walker: type) type {
                             .disable_sanitizer_instrumentation,
                             .nosanitize_bounds,
                             => |val| val,
-                            else => return error.InvalidBitcode,
+                            else => return try self.parseError(.{ .param_attr_invalid_key = key }),
                         } };
                         try attrs.append(attr);
                     },
@@ -629,26 +647,26 @@ fn Parser(comptime Walker: type) type {
                                     .max = if (max == std.math.maxInt(u32)) null else max,
                                 } };
                             },
-                            else => return error.InvalidBitcode,
+                            else => return try self.parseError(.{ .param_attr_invalid_key = key }),
                         } };
                         try attrs.append(attr);
                     },
                     .string => {
-                        const key = try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator()) orelse return error.InvalidBitcode;
+                        const key = try self.parseStringOpZ();
                         const attr = P.Entry.Attr{ .custom = .{ .attr = key, .value = null } };
                         try attrs.append(attr);
                     },
                     .string_with_value => {
-                        const kv = try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator()) orelse return error.InvalidBitcode;
-                        const key_end = std.mem.indexOfScalar(u8, kv, 0) orelse return error.InvalidBitcode;
-                        if (key_end + 2 > kv.len) return error.InvalidBitcode;
-                        const key = kv[0..key_end];
-                        const val_end = (std.mem.indexOfScalar(u8, kv[key_end + 1 ..], 0) orelse return error.InvalidBitcode) + key_end;
-                        const val = kv[key_end + 1 .. val_end];
+                        const key = try self.parseStringOpZ();
+                        const val = try self.parseStringOpZ();
                         const attr = P.Entry.Attr{ .custom = .{ .attr = key, .value = val } };
                         try attrs.append(attr);
                     },
-                    _ => return error.InvalidBitcode,
+                    .unknown5, .unknown6 => {
+                        std.log.warn("TODO: undocumented attribute encoding; skipping record remainder", .{});
+                        break;
+                    },
+                    _ => return try self.parseError(.{ .param_attr_invalid_kind = kind }),
                 }
             }
             entry.attrs = try attrs.toOwnedSlice();
@@ -676,7 +694,9 @@ fn Parser(comptime Walker: type) type {
                         },
                         else => {},
                     }
-                    if (next_type_index == null) return error.InvalidBitcode;
+                    if (next_type_index == null) {
+                        return try self.parseError(.constants_type_not_set);
+                    }
                     const val: Bitcode.Constant.Value = switch (rc) {
                         .CST_CODE_SETTYPE => unreachable,
                         .CST_CODE_NULL => .null,
@@ -733,6 +753,17 @@ fn Parser(comptime Walker: type) type {
         fn parseMetadataAttachmentBlock(self: *Self) Error!void {
             _ = self;
             @panic("TODO");
+        }
+
+        fn parseStringOpZ(self: *Self) Error![]const u8 {
+            var str = ArrayList(u8).init(self.arena.allocator());
+            while (try self.walker.nextRecordValue(u8)) |char| {
+                if (char == 0) break;
+                try str.append(char);
+            } else {
+                return try self.parseError(.expected_nul_termination);
+            }
+            return try str.toOwnedSlice();
         }
 
         fn parseOp(self: *Self, comptime T: type) Error!T {

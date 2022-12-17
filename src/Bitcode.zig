@@ -311,6 +311,8 @@ pub const Module = struct {
                     well_known_with_value = 1,
                     string = 3,
                     string_with_value = 4,
+                    unknown5 = 5,
+                    unknown6 = 6,
                     _,
 
                     pub const WellKnown = enum(u8) {
@@ -429,7 +431,7 @@ pub const Module = struct {
         attributes_index: ?u32,
         preemption_specifier: PreemptionSpecifier,
 
-        pub const Linkage = enum(u4) {
+        pub const Linkage = enum(u5) {
             external,
             weak,
             appending,
@@ -443,6 +445,12 @@ pub const Module = struct {
             weak_odr,
             link_once_odr,
             available_externally,
+
+            weak2 = 16,
+            weak_odr2,
+            link_once2,
+            link_once_odr2,
+
             _,
 
             pub const jsonStringify = defaultEnumJsonStringify(@This());

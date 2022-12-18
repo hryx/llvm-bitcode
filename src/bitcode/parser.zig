@@ -15,7 +15,7 @@ pub const Result = union(enum) {
 
     pub const Error = struct {
         bit_pos: usize,
-        in_block: ?Bitcode.BlockId,
+        block_stack: []Bitcode.BlockId,
         kind: Kind,
 
         pub const Kind = union(enum) {
@@ -24,15 +24,9 @@ pub const Result = union(enum) {
             overflow,
             end_of_stream,
             end_of_record,
-            unexpected_sub_block_in: Bitcode.BlockId,
-            unexpected_block_id: Bitcode.BlockId,
-            unexpected_block_id_in: struct {
-                id: Bitcode.BlockId,
-                in: Bitcode.BlockId,
-            },
-            unknown_block_id: u32,
+            unexpected_block,
             unknown_record_code: u32,
-            duplicate_block: Bitcode.BlockId,
+            duplicate_block,
             module_duplicate_record: Bitcode.Module.Code,
             module_version: u8,
             type_duplicate_num_entry,
@@ -48,19 +42,29 @@ pub const Result = union(enum) {
             const byte = err.bit_pos / 8;
             const bit_off = err.bit_pos % 8;
             try writer.print("bit {} (0x{x:0>4}+{}): ", .{ err.bit_pos, byte, bit_off });
-            try writer.print("in block {s}: ", .{if (err.in_block) |b| @tagName(b) else "(top)"});
+            {
+                try writer.print("block stack [ ", .{});
+                const start = b: {
+                    if (err.block_stack.len > 4) {
+                        try writer.print("... ", .{});
+                        break :b err.block_stack.len - 4;
+                    }
+                    break :b 0;
+                };
+                for (err.block_stack[start..]) |id| {
+                    try writer.print("{} ", .{id});
+                }
+                try writer.print("]: ", .{});
+            }
             switch (err.kind) {
                 .invalid_bitstream => |we| try we.render(writer),
                 .magic => try writer.print("magic header bytes do not identify stream as bitcode", .{}),
                 .overflow => try writer.print("integer overflowed while parsing", .{}),
                 .end_of_stream => try writer.print("unexpected end of bitstream", .{}),
                 .end_of_record => try writer.print("expected more values when parsing record", .{}),
-                .unexpected_sub_block_in => |in| try writer.print("unexpected sub-block in {s}", .{@tagName(in)}),
-                .unexpected_block_id => |id| try writer.print("unexpected sub-block {s}", .{@tagName(id)}),
-                .unexpected_block_id_in => |e| try writer.print("unexpected sub-block {s} in parent {s}", .{ @tagName(e.id), @tagName(e.in) }),
-                .unknown_block_id => |id| try writer.print("unknown sub-block ID {}", .{id}),
+                .unexpected_block => try writer.print("unexpected block in this context", .{}),
                 .unknown_record_code => |id| try writer.print("unknown record code {}", .{id}),
-                .duplicate_block => |id| try writer.print("unexpected duplicate block {s}", .{@tagName(id)}),
+                .duplicate_block => try writer.print("unexpected duplicate block", .{}),
                 .module_duplicate_record => |code| try writer.print("duplicate module record {s}", .{@tagName(code)}),
                 .module_version => |v| try writer.print("unsupported module version {}", .{v}),
                 .type_duplicate_num_entry => try writer.print("duplicate TYPE_NUMENTRY records", .{}),
@@ -86,7 +90,7 @@ pub fn parse(gpa: Allocator, src: []const u8) !Result {
     if (!std.mem.eql(u8, &magic, &Bitcode.magic)) {
         return Result{ .failure = .{
             .bit_pos = walker.r.pos,
-            .in_block = null,
+            .block_stack = &.{},
             .kind = .magic,
         } };
     }
@@ -96,9 +100,12 @@ pub fn parse(gpa: Allocator, src: []const u8) !Result {
     p.parse() catch |err| return Result{
         .failure = .{
             .bit_pos = walker.r.pos,
-            .in_block = if (p.walker.block_stack.items.len == 0) null else b: {
-                const id = p.walker.block_stack.items[p.walker.block_stack.items.len - 1].block_id;
-                break :b @intToEnum(Bitcode.BlockId, id);
+            .block_stack = b: {
+                const ids = try gpa.alloc(Bitcode.BlockId, p.walker.block_stack.items.len);
+                for (p.walker.block_stack.items) |item, i| {
+                    ids[i] = @intToEnum(Bitcode.BlockId, item.block_id);
+                }
+                break :b ids;
             },
             .kind = switch (err) {
                 error.EndOfStream => .end_of_stream,
@@ -165,7 +172,7 @@ fn Parser(comptime Walker: type) type {
                     .MODULE_BLOCK_ID => try self.parseModuleBlock(),
                     .TYPE_BLOCK_ID => try self.parseTypeBlock(),
                     .STRTAB_BLOCK_ID => try self.parseStrtabBlock(),
-                    .FUNCTION_BLOCK_ID => @panic("TODO"),
+                    .FUNCTION_BLOCK_ID => try self.parseFunctionBlock(),
                     .MODULE_STRTAB_BLOCK_ID,
                     .PARAMATTR_BLOCK_ID,
                     .PARAMATTR_GROUP_BLOCK_ID,
@@ -180,28 +187,20 @@ fn Parser(comptime Walker: type) type {
                     .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
                     .SYMTAB_BLOCK_ID,
                     .SYNC_SCOPE_NAMES_BLOCK_ID,
-                    => {
-                        std.log.err("TODO: {}", .{@intToEnum(Bitcode.BlockId, block_id)});
-                        while (try self.walker.next()) |todo| switch (todo) {
-                            .enter_block => unreachable,
-                            .end_block => break,
-                            .record => {},
-                        };
-                    },
-                    // => return error.TODO,
-                    _ => return try self.parseError(.{ .unknown_block_id = block_id }),
+                    => return try self.parseError(.unexpected_block),
+                    _ => return try self.parseError(.unexpected_block),
                 }
             }
         }
 
         fn parseIdentificationBlock(self: *Self) Error!void {
             if (self.found.identification) {
-                return try self.parseError(.{ .duplicate_block = .IDENTIFICATION_BLOCK_ID });
+                return try self.parseError(.duplicate_block);
             }
             self.found.identification = true;
 
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .IDENTIFICATION_BLOCK_ID }),
+                .enter_block => return try self.parseError(.unexpected_block),
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Idendification.Code, code)) {
                     .IDENTIFICATION_CODE_STRING => {
@@ -217,7 +216,7 @@ fn Parser(comptime Walker: type) type {
 
         fn parseModuleBlock(self: *Self) Error!void {
             if (self.found.module) {
-                return try self.parseError(.{ .duplicate_block = .MODULE_BLOCK_ID });
+                return try self.parseError(.duplicate_block);
             }
             self.found.module = true;
 
@@ -229,30 +228,27 @@ fn Parser(comptime Walker: type) type {
                     .VALUE_SYMTAB_BLOCK_ID => try self.parseValueSymtabBlock(),
                     .CONSTANTS_BLOCK_ID => {
                         if (self.bc.module.constants.len > 0) {
-                            return try self.parseError(.{ .duplicate_block = .CONSTANTS_BLOCK_ID });
+                            return try self.parseError(.duplicate_block);
                         }
                         try self.parseConstantsBlock(&self.bc.module.constants);
                     },
                     .FUNCTION_BLOCK_ID => try self.parseFunctionBlock(),
                     .METADATA_BLOCK_ID => try self.parseMetadataBlock(),
-                    .METADATA_ATTACHMENT_ID,
+                    inline .METADATA_ATTACHMENT_ID,
                     .METADATA_KIND_BLOCK_ID,
-                    => std.log.err("TODO: {}", .{@intToEnum(Bitcode.BlockId, block_id)}),
+                    .OPERAND_BUNDLE_TAGS_BLOCK_ID,
+                    .SYNC_SCOPE_NAMES_BLOCK_ID,
+                    => |e| try self.todoSkipBlock(e),
                     .MODULE_BLOCK_ID,
                     .IDENTIFICATION_BLOCK_ID,
                     .USELIST_BLOCK_ID,
                     .MODULE_STRTAB_BLOCK_ID,
                     .GLOBALVAL_SUMMARY_BLOCK_ID,
-                    .OPERAND_BUNDLE_TAGS_BLOCK_ID,
                     .STRTAB_BLOCK_ID,
                     .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
                     .SYMTAB_BLOCK_ID,
-                    .SYNC_SCOPE_NAMES_BLOCK_ID,
-                    => return try self.parseError(.{ .unexpected_block_id_in = .{
-                        .id = @intToEnum(Bitcode.BlockId, block_id),
-                        .in = .MODULE_BLOCK_ID,
-                    } }),
-                    _ => return try self.parseError(.{ .unknown_block_id = block_id }),
+                    => return try self.parseError(.unexpected_block),
+                    _ => return try self.parseError(.unexpected_block),
                 },
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Module.Code, code)) {
@@ -374,7 +370,7 @@ fn Parser(comptime Walker: type) type {
                     .MODULE_CODE_VSTOFFSET,
                     .MODULE_CODE_HASH,
                     .MODULE_CODE_IFUNC,
-                    => std.log.warn("TODO: module code {s}", .{@tagName(@intToEnum(Bitcode.Module.Code, code))}),
+                    => std.log.err("TODO: module code {s}", .{@tagName(@intToEnum(Bitcode.Module.Code, code))}),
                     _ => return try self.parseError(.{ .unknown_record_code = code }),
                 },
             } else unreachable;
@@ -382,12 +378,12 @@ fn Parser(comptime Walker: type) type {
 
         fn parseStrtabBlock(self: *Self) Error!void {
             if (self.found.strtab) {
-                return try self.parseError(.{ .duplicate_block = .STRTAB_BLOCK_ID });
+                return try self.parseError(.duplicate_block);
             }
             self.found.strtab = true;
 
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .STRTAB_BLOCK_ID }),
+                .enter_block => return try self.parseError(.unexpected_block),
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Strtab.Code, code)) {
                     .STRTAB_BLOB => self.bc.strtab.contents = (try self.walker.recordBlob()).?,
@@ -398,7 +394,7 @@ fn Parser(comptime Walker: type) type {
 
         fn parseTypeBlock(self: *Self) Error!void {
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .TYPE_BLOCK_ID }),
+                .enter_block => return try self.parseError(.unexpected_block),
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Module.Type.Code, code)) {
                     .TYPE_CODE_NUMENTRY => {
@@ -506,7 +502,7 @@ fn Parser(comptime Walker: type) type {
         fn parseParamAttrBlock(self: *Self, dst: *Bitcode.Module.ParamAttr) Error!void {
             var indexes = ArrayList(u32).init(self.arena.allocator());
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .PARAMATTR_BLOCK_ID }),
+                .enter_block => return try self.parseError(.unexpected_block),
                 .end_block => break,
                 .record => |code| switch (@intToEnum(Bitcode.Module.ParamAttr.Code, code)) {
                     .PARAMATTR_CODE_ENTRY => {
@@ -524,15 +520,15 @@ fn Parser(comptime Walker: type) type {
         }
 
         fn parseParamAttrGroupBlock(self: *Self) Error!void {
-            if (self.found.param_attr_group) return try self.parseError(.{ .duplicate_block = .PARAMATTR_GROUP_BLOCK_ID });
+            if (self.found.param_attr_group) return try self.parseError(.duplicate_block);
             self.found.param_attr_group = true;
             const P = Bitcode.Module.ParamAttrGroup;
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .PARAMATTR_GROUP_BLOCK_ID }),
+                .enter_block => return try self.parseError(.unexpected_block),
                 .end_block => break,
                 .record => |code| switch (@intToEnum(P.Code, code)) {
                     .PARAMATTR_GRP_CODE_ENTRY => try self.parseParamAttrGroupEntry(),
-                    _ => std.log.warn("unknown param attr group code {}", .{code}),
+                    _ => std.log.err("unknown param attr group code {}", .{code}),
                 },
             } else unreachable;
         }
@@ -668,7 +664,7 @@ fn Parser(comptime Walker: type) type {
                         try attrs.append(attr);
                     },
                     .unknown5, .unknown6 => {
-                        std.log.warn("TODO: undocumented attribute encoding; skipping record remainder", .{});
+                        std.log.err("TODO: undocumented attribute encoding; skipping record remainder", .{});
                         break;
                     },
                     _ => return try self.parseError(.{ .param_attr_invalid_kind = kind }),
@@ -680,15 +676,14 @@ fn Parser(comptime Walker: type) type {
         }
 
         fn parseValueSymtabBlock(self: *Self) Error!void {
-            _ = self;
-            @panic("TODO");
+            try self.todoSkipBlock(.VALUE_SYMTAB_BLOCK_ID);
         }
 
         fn parseConstantsBlock(self: *Self, dst: *[]Bitcode.Constant) Error!void {
             var constants = ArrayList(Bitcode.Constant).init(self.arena.allocator());
             var next_type_index: ?u32 = null;
             while (try self.walker.next()) |item| switch (item) {
-                .enter_block => return try self.parseError(.{ .unexpected_sub_block_in = .CONSTANTS_BLOCK_ID }),
+                .enter_block => return try self.parseError(.unexpected_block),
                 .end_block => return,
                 .record => |code| {
                     const rc = @intToEnum(Bitcode.Constant.Code, code);
@@ -736,7 +731,10 @@ fn Parser(comptime Walker: type) type {
                         .CST_CODE_INLINEASM_OLD3,
                         .CST_CODE_NO_CFI_VALUE,
                         .CST_CODE_INLINEASM,
-                        => @panic("TODO"),
+                        => {
+                            std.log.err("TODO: constants code {}", .{rc});
+                            continue;
+                        },
                         _ => return try self.parseError(.{ .unknown_record_code = code }),
                     };
                     try constants.append(.{ .type_index = next_type_index.?, .value = val });
@@ -746,18 +744,39 @@ fn Parser(comptime Walker: type) type {
         }
 
         fn parseFunctionBlock(self: *Self) Error!void {
-            _ = self;
-            @panic("TODO");
+            const F = Bitcode.Module.Function;
+            var func: F = undefined;
+            while (try self.walker.next()) |item| switch (item) {
+                .enter_block => |block_id| {
+                    switch (@intToEnum(Bitcode.BlockId, block_id)) {
+                        .CONSTANTS_BLOCK_ID => try self.parseConstantsBlock(&func.constants),
+                        .VALUE_SYMTAB_BLOCK_ID => try self.parseValueSymtabBlock(),
+                        .METADATA_ATTACHMENT_ID => try self.parseMetadataAttachmentBlock(),
+                        else => return try self.parseError(.unexpected_block),
+                    }
+                },
+                .end_block => return,
+                .record => |code| {
+                    std.log.err("TODO: function code {}", .{code});
+                },
+            };
         }
 
         fn parseMetadataBlock(self: *Self) Error!void {
-            _ = self;
-            @panic("TODO");
+            try self.todoSkipBlock(.METADATA_BLOCK_ID);
         }
 
         fn parseMetadataAttachmentBlock(self: *Self) Error!void {
-            _ = self;
-            @panic("TODO");
+            try self.todoSkipBlock(.METADATA_ATTACHMENT_ID);
+        }
+
+        fn todoSkipBlock(self: *Self, block_id: Bitcode.BlockId) Error!void {
+            std.log.err("TODO: skipping block {s}", .{@tagName(block_id)});
+            while (try self.walker.next()) |item| switch (item) {
+                .enter_block => |sub_id| try self.todoSkipBlock(@intToEnum(Bitcode.BlockId, sub_id)),
+                .end_block => return,
+                .record => {},
+            } else unreachable;
         }
 
         fn parseStringOpZ(self: *Self) Error![]const u8 {

@@ -38,6 +38,39 @@ pub const BlockId = enum(std.meta.Tag(codes.block.Id)) {
         assert(@enumToInt(from) >= codes.block.Id.first_application_id);
         return @intToEnum(BlockId, @enumToInt(from));
     }
+
+    pub fn format(
+        self: BlockId,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        _ = fmt;
+        _ = options;
+        switch (self) {
+            .MODULE_BLOCK_ID,
+            .PARAMATTR_BLOCK_ID,
+            .PARAMATTR_GROUP_BLOCK_ID,
+            .CONSTANTS_BLOCK_ID,
+            .FUNCTION_BLOCK_ID,
+            .IDENTIFICATION_BLOCK_ID,
+            .VALUE_SYMTAB_BLOCK_ID,
+            .METADATA_BLOCK_ID,
+            .METADATA_ATTACHMENT_ID,
+            .TYPE_BLOCK_ID,
+            .USELIST_BLOCK_ID,
+            .MODULE_STRTAB_BLOCK_ID,
+            .GLOBALVAL_SUMMARY_BLOCK_ID,
+            .OPERAND_BUNDLE_TAGS_BLOCK_ID,
+            .METADATA_KIND_BLOCK_ID,
+            .STRTAB_BLOCK_ID,
+            .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
+            .SYMTAB_BLOCK_ID,
+            .SYNC_SCOPE_NAMES_BLOCK_ID,
+            => try writer.writeAll(@tagName(self)),
+            _ => try writer.print("unknown({})", .{@enumToInt(self)}),
+        }
+    }
 };
 
 identification: Idendification = .{},

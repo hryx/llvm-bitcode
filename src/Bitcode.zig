@@ -456,14 +456,14 @@ pub const Module = struct {
         linkage: Linkage,
         alignment_log2: u16,
         section_index: ?u32,
-        visibility: Visibility,
-        @"threadlocal": Threadlocal,
-        unnamed_addr: UnnamedAddr,
-        externally_initialized: bool,
-        dll_storage_class: DllStorageClass,
-        comdat: u64, // TODO
-        attributes_index: ?u32,
-        preemption_specifier: PreemptionSpecifier,
+        visibility: Visibility = .default,
+        @"threadlocal": Threadlocal = .no,
+        unnamed_addr: UnnamedAddr = .no,
+        externally_initialized: bool = false,
+        dll_storage_class: DllStorageClass = .default,
+        comdat: u64 = 0, // TODO
+        attributes_index: ?u32 = null,
+        preemption_specifier: PreemptionSpecifier = .dso_preemptable,
 
         pub const Linkage = enum(u5) {
             external,

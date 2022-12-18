@@ -173,6 +173,7 @@ fn Parser(comptime Walker: type) type {
                     .TYPE_BLOCK_ID => try self.parseTypeBlock(),
                     .STRTAB_BLOCK_ID => try self.parseStrtabBlock(),
                     .FUNCTION_BLOCK_ID => try self.parseFunctionBlock(),
+                    .SYMTAB_BLOCK_ID => try self.todoSkipBlock(.SYMTAB_BLOCK_ID),
                     .MODULE_STRTAB_BLOCK_ID,
                     .PARAMATTR_BLOCK_ID,
                     .PARAMATTR_GROUP_BLOCK_ID,
@@ -185,7 +186,6 @@ fn Parser(comptime Walker: type) type {
                     .OPERAND_BUNDLE_TAGS_BLOCK_ID,
                     .METADATA_KIND_BLOCK_ID,
                     .FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID,
-                    .SYMTAB_BLOCK_ID,
                     .SYNC_SCOPE_NAMES_BLOCK_ID,
                     => return try self.parseError(.unexpected_block),
                     _ => return try self.parseError(.unexpected_block),
@@ -207,7 +207,7 @@ fn Parser(comptime Walker: type) type {
                         self.bc.identification.string = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
                     },
                     .IDENTIFICATION_CODE_EPOCH => {
-                        self.bc.identification.epoch = try self.parseOp(u0);
+                        self.bc.identification.epoch = try self.expectOp(u0);
                     },
                     _ => return try self.parseError(.{ .unknown_record_code = code }),
                 },
@@ -254,51 +254,55 @@ fn Parser(comptime Walker: type) type {
                 .record => |code| switch (@intToEnum(Bitcode.Module.Code, code)) {
                     .MODULE_CODE_GLOBALVAR => {
                         const G = Bitcode.Module.GlobalVar;
-                        const g = G{
-                            .strtab_offset = try self.parseOp(u32),
-                            .strtab_size = try self.parseOp(u32),
-                            .pointer_type_index = try self.parseOp(u32),
-                            .is_const = try self.parseOp(bool),
+                        var g: G = .{
+                            .strtab_offset = try self.expectOp(u32),
+                            .strtab_size = try self.expectOp(u32),
+                            .pointer_type_index = try self.expectOp(u32),
+                            .is_const = try self.expectOp(bool),
                             .init_id = try self.parseOptionalIndex(u32),
-                            .linkage = try self.parseOp(G.Linkage),
-                            .alignment_log2 = try self.parseOp(u16),
+                            .linkage = try self.expectOp(G.Linkage),
+                            .alignment_log2 = try self.expectOp(u16),
                             .section_index = try self.parseOptionalIndex(u32),
-                            .visibility = try self.parseOp(G.Visibility),
-                            .@"threadlocal" = try self.parseOp(G.Threadlocal),
-                            .unnamed_addr = try self.parseOp(G.UnnamedAddr),
-                            .externally_initialized = try self.parseOp(bool),
-                            .dll_storage_class = try self.parseOp(G.DllStorageClass),
-                            .comdat = try self.parseOp(u64), // TODO
-                            .attributes_index = try self.parseOptionalIndex(u32),
-                            .preemption_specifier = try self.parseOp(G.PreemptionSpecifier),
+                        };
+                        // These fields may or may not be in the record,
+                        // and all have default values.
+                        b: {
+                            g.visibility = try self.parseOp(G.Visibility) orelse break :b;
+                            g.@"threadlocal" = try self.parseOp(G.Threadlocal) orelse break :b;
+                            g.unnamed_addr = try self.parseOp(G.UnnamedAddr) orelse break :b;
+                            g.externally_initialized = try self.parseOp(bool) orelse break :b;
+                            g.dll_storage_class = try self.parseOp(G.DllStorageClass) orelse break :b;
+                            g.comdat = try self.parseOp(u64) orelse break :b; // TODO
+                            g.attributes_index = try self.parseOptionalIndex(u32) orelse break :b;
+                            g.preemption_specifier = try self.parseOp(G.PreemptionSpecifier) orelse break :b;
                             // undocumented:
                             // 16 partition strtab offset
                             // 17 partition strtab size
-                        };
+                        }
                         try self.appendOne(G, &self.bc.module.global_var, g);
                     },
                     .MODULE_CODE_FUNCTION => {
                         const F = Bitcode.Module.Function;
                         const G = Bitcode.Module.GlobalVar;
                         const f = F{
-                            .strtab_offset = try self.parseOp(u32),
-                            .strtab_size = try self.parseOp(u32),
-                            .type_index = try self.parseOp(u32),
-                            .calling_conv = try self.parseOp(F.CallingConv),
-                            .is_proto = try self.parseOp(bool),
-                            .linkage = try self.parseOp(G.Linkage),
+                            .strtab_offset = try self.expectOp(u32),
+                            .strtab_size = try self.expectOp(u32),
+                            .type_index = try self.expectOp(u32),
+                            .calling_conv = try self.expectOp(F.CallingConv),
+                            .is_proto = try self.expectOp(bool),
+                            .linkage = try self.expectOp(G.Linkage),
                             .param_attr_index = try self.parseOptionalIndex(u32),
-                            .alignment_log2 = try self.parseOp(u16),
+                            .alignment_log2 = try self.expectOp(u16),
                             .section_index = try self.parseOptionalIndex(u32),
-                            .visibility = try self.parseOp(G.Visibility),
+                            .visibility = try self.expectOp(G.Visibility),
                             .gc_index = try self.parseOptionalIndex(u32),
-                            .unnamed_addr = try self.parseOp(G.UnnamedAddr),
+                            .unnamed_addr = try self.expectOp(G.UnnamedAddr),
                             .prologue_data_index = try self.parseOptionalIndex(u32),
-                            .dll_storage_class = try self.parseOp(G.DllStorageClass),
-                            .comdat = try self.parseOp(u64), // TODO
+                            .dll_storage_class = try self.expectOp(G.DllStorageClass),
+                            .comdat = try self.expectOp(u64), // TODO
                             .prefix_index = try self.parseOptionalIndex(u32),
                             .personality_fn_index = try self.parseOptionalIndex(u32),
-                            .preemption_specifier = try self.parseOp(G.PreemptionSpecifier),
+                            .preemption_specifier = try self.expectOp(G.PreemptionSpecifier),
                         };
                         try self.appendOne(F, &self.bc.module.function, f);
                     },
@@ -306,7 +310,7 @@ fn Parser(comptime Walker: type) type {
                         if (self.bc.module.version != 0) {
                             return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_VERSION });
                         }
-                        const version = try self.parseOp(u8);
+                        const version = try self.expectOp(u8);
                         if (version != 2) {
                             // Can only parse v2 for now
                             return try self.parseError(.{ .module_version = version });
@@ -349,16 +353,16 @@ fn Parser(comptime Walker: type) type {
                         const A = Bitcode.Module.Alias;
                         const G = Bitcode.Module.GlobalVar;
                         const a = A{
-                            .strtab_offset = try self.parseOp(u32),
-                            .strtab_size = try self.parseOp(u32),
-                            .type_index = try self.parseOp(u32),
-                            .aliasee_val_index = try self.parseOp(u32),
-                            .linkage = try self.parseOp(G.Linkage),
-                            .visibility = try self.parseOp(G.Visibility),
-                            .dll_storage_class = try self.parseOp(G.DllStorageClass),
-                            .@"threadlocal" = try self.parseOp(G.Threadlocal),
-                            .unnamed_addr = try self.parseOp(G.UnnamedAddr),
-                            .preemption_specifier = try self.parseOp(G.PreemptionSpecifier),
+                            .strtab_offset = try self.expectOp(u32),
+                            .strtab_size = try self.expectOp(u32),
+                            .type_index = try self.expectOp(u32),
+                            .aliasee_val_index = try self.expectOp(u32),
+                            .linkage = try self.expectOp(G.Linkage),
+                            .visibility = try self.expectOp(G.Visibility),
+                            .dll_storage_class = try self.expectOp(G.DllStorageClass),
+                            .@"threadlocal" = try self.expectOp(G.Threadlocal),
+                            .unnamed_addr = try self.expectOp(G.UnnamedAddr),
+                            .preemption_specifier = try self.expectOp(G.PreemptionSpecifier),
                         };
                         try self.appendOne(A, &self.bc.module.aliases, a);
                     },
@@ -401,7 +405,7 @@ fn Parser(comptime Walker: type) type {
                         if (self.bc.module.type.entries.len != 0) {
                             return try self.parseError(.type_duplicate_num_entry);
                         }
-                        const count = try self.parseOp(usize);
+                        const count = try self.expectOp(usize);
                         self.bc.module.type.entries = try self.arena.allocator().alloc(Bitcode.Module.Type.Entry, count);
                     },
                     .TYPE_CODE_VOID => try self.appendTypeDefinition(.void),
@@ -410,27 +414,27 @@ fn Parser(comptime Walker: type) type {
                     .TYPE_CODE_LABEL => try self.appendTypeDefinition(.label),
                     .TYPE_CODE_OPAQUE => try self.appendTypeDefinitionNamed(.{ .@"opaque" = undefined }),
                     .TYPE_CODE_INTEGER => {
-                        const width = try self.parseOp(u16);
+                        const width = try self.expectOp(u16);
                         try self.appendTypeDefinition(.{ .integer = width });
                     },
                     .TYPE_CODE_POINTER => {
                         const t = Bitcode.Module.Type.Entry{ .pointer = .{
-                            .pointee_type_index = try self.parseOp(u32),
-                            .address_space = try self.parseOp(u16),
+                            .pointee_type_index = try self.expectOp(u32),
+                            .address_space = try self.expectOp(u16),
                         } };
                         try self.appendTypeDefinition(t);
                     },
                     .TYPE_CODE_HALF => try self.appendTypeDefinition(.float),
                     .TYPE_CODE_ARRAY => {
                         try self.appendTypeDefinition(.{ .array = .{
-                            .element_count = try self.parseOp(u64),
-                            .element_type_index = try self.parseOp(u32),
+                            .element_count = try self.expectOp(u64),
+                            .element_type_index = try self.expectOp(u32),
                         } });
                     },
                     .TYPE_CODE_VECTOR => {
                         try self.appendTypeDefinition(.{ .vector = .{
-                            .element_count = try self.parseOp(u64),
-                            .element_type_index = try self.parseOp(u32),
+                            .element_count = try self.expectOp(u64),
+                            .element_type_index = try self.expectOp(u32),
                         } });
                     },
                     .TYPE_CODE_X86_FP80 => try self.appendTypeDefinition(.x86_fp80),
@@ -441,7 +445,7 @@ fn Parser(comptime Walker: type) type {
                     .TYPE_CODE_STRUCT_ANON => {
                         try self.appendTypeDefinition(.{ .@"struct" = .{
                             .name = null,
-                            .is_packed = try self.parseOp(bool),
+                            .is_packed = try self.expectOp(bool),
                             .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
                         } });
                     },
@@ -451,14 +455,14 @@ fn Parser(comptime Walker: type) type {
                     .TYPE_CODE_STRUCT_NAMED => {
                         try self.appendTypeDefinitionNamed(.{ .@"struct" = .{
                             .name = undefined,
-                            .is_packed = try self.parseOp(bool),
+                            .is_packed = try self.expectOp(bool),
                             .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
                         } });
                     },
                     .TYPE_CODE_FUNCTION => {
                         try self.appendTypeDefinition(.{ .function = .{
-                            .is_vararg = try self.parseOp(bool),
-                            .return_type_index = try self.parseOp(u32),
+                            .is_vararg = try self.expectOp(bool),
+                            .return_type_index = try self.expectOp(u32),
                             .param_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
                         } });
                     },
@@ -536,8 +540,8 @@ fn Parser(comptime Walker: type) type {
         fn parseParamAttrGroupEntry(self: *Self) Error!void {
             const P = Bitcode.Module.ParamAttrGroup;
             var entry = P.Entry{
-                .group_id = try self.parseOp(u32),
-                .param_idx = (try self.parseOp(P.Entry.ParamIdx.Code)).toParamIdx(),
+                .group_id = try self.expectOp(u32),
+                .param_idx = (try self.expectOp(P.Entry.ParamIdx.Code)).toParamIdx(),
                 .attrs = undefined,
             };
 
@@ -546,7 +550,7 @@ fn Parser(comptime Walker: type) type {
                 const kind = @intToEnum(P.Entry.Attr.Kind, kind_code);
                 switch (kind) {
                     .well_known => {
-                        const key = try self.parseOp(P.Entry.Attr.Kind.WellKnown);
+                        const key = try self.expectOp(P.Entry.Attr.Kind.WellKnown);
                         const attr: P.Entry.Attr = .{ .well_known = switch (key) {
                             inline .alwaysinline,
                             .byval,
@@ -624,14 +628,14 @@ fn Parser(comptime Walker: type) type {
                         try attrs.append(attr);
                     },
                     .well_known_with_value => {
-                        const key = try self.parseOp(P.Entry.Attr.Kind.WellKnown);
+                        const key = try self.expectOp(P.Entry.Attr.Kind.WellKnown);
                         const attr: P.Entry.Attr = .{ .well_known = switch (key) {
-                            .@"align" => .{ .@"align" = try self.parseOp(u32) },
-                            .alignstack => .{ .alignstack = try self.parseOp(u32) },
-                            .dereferenceable => .{ .dereferenceable = try self.parseOp(u32) },
-                            .dereferenceable_or_null => .{ .dereferenceable_or_null = try self.parseOp(u32) },
+                            .@"align" => .{ .@"align" = try self.expectOp(u32) },
+                            .alignstack => .{ .alignstack = try self.expectOp(u32) },
+                            .dereferenceable => .{ .dereferenceable = try self.expectOp(u32) },
+                            .dereferenceable_or_null => .{ .dereferenceable_or_null = try self.expectOp(u32) },
                             .allocsize => b: {
-                                const val = try self.parseOp(u64);
+                                const val = try self.expectOp(u64);
                                 const elem_size = @intCast(u32, val >> 32);
                                 const num_elems = @truncate(u32, val);
                                 break :b .{ .allocsize = .{
@@ -640,7 +644,7 @@ fn Parser(comptime Walker: type) type {
                                 } };
                             },
                             .vscale_range => b: {
-                                const val = try self.parseOp(u64);
+                                const val = try self.expectOp(u64);
                                 const min = @intCast(u32, val >> 32);
                                 const max = @truncate(u32, val);
                                 break :b .{ .vscale_range = .{
@@ -689,7 +693,7 @@ fn Parser(comptime Walker: type) type {
                     const rc = @intToEnum(Bitcode.Constant.Code, code);
                     switch (rc) {
                         .CST_CODE_SETTYPE => {
-                            next_type_index = try self.parseOp(u32);
+                            next_type_index = try self.expectOp(u32);
                             continue;
                         },
                         else => {},
@@ -701,12 +705,12 @@ fn Parser(comptime Walker: type) type {
                         .CST_CODE_SETTYPE => unreachable,
                         .CST_CODE_NULL => .null,
                         .CST_CODE_UNDEF => .undef,
-                        .CST_CODE_INTEGER => .{ .int = try self.parseOp(u64) },
+                        .CST_CODE_INTEGER => .{ .int = try self.expectOp(u64) },
                         .CST_CODE_WIDE_INTEGER => val: {
                             // TODO
                             break :val .{ .wide_int = (try self.walker.remainingRecordValuesAlloc(u64, self.arena.allocator())).? };
                         },
-                        .CST_CODE_FLOAT => .{ .float = try self.parseOp(u64) },
+                        .CST_CODE_FLOAT => .{ .float = try self.expectOp(u64) },
                         .CST_CODE_AGGREGATE => .{ .aggregate = (try self.walker.remainingRecordValuesAlloc(u64, self.arena.allocator())).? },
                         .CST_CODE_STRING => .{ .string = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).? },
                         .CST_CODE_CSTRING => .{ .cstring = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).? },
@@ -790,22 +794,22 @@ fn Parser(comptime Walker: type) type {
             return try str.toOwnedSlice();
         }
 
-        fn parseOp(self: *Self, comptime T: type) Error!T {
+        fn parseOp(self: *Self, comptime T: type) Error!?T {
             const info = @typeInfo(T);
             switch (info) {
                 .Enum => {
                     const Tag = info.Enum.tag_type;
-                    const int = try self.mustReadOp(Tag);
+                    const int = (try self.walker.nextRecordValue(Tag)) orelse return null;
                     return @intToEnum(T, int);
                 },
                 .Int => {
-                    return try self.mustReadOp(T);
+                    return try self.walker.nextRecordValue(T);
                 },
                 .Bool => {
-                    return (try self.mustReadOp(u64) != 0);
+                    return ((try self.walker.nextRecordValue(u64)) orelse return null) != 0;
                 },
                 .Void => {
-                    _ = try self.mustReadOp(u64);
+                    _ = try self.walker.nextRecordValue(u64);
                 },
                 else => {
                     @compileError("cannot parse op into a " ++ @typeName(T));
@@ -813,12 +817,12 @@ fn Parser(comptime Walker: type) type {
             }
         }
 
-        fn mustReadOp(self: *Self, comptime T: type) Error!T {
-            return (try self.walker.nextRecordValue(T)) orelse try self.parseError(.end_of_record);
+        fn expectOp(self: *Self, comptime T: type) Error!T {
+            return (try self.parseOp(T)) orelse try self.parseError(.end_of_record);
         }
 
         fn parseOptionalIndex(self: *Self, comptime T: type) Error!?T {
-            const x = try self.parseOp(T);
+            const x = (try self.parseOp(T)) orelse return null;
             return if (x == 0) null else x - 1;
         }
 

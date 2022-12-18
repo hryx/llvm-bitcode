@@ -9,9 +9,16 @@ const codes = bitstream.codes;
 
 const Bitcode = @import("../Bitcode.zig");
 
-pub const Result = union(enum) {
-    success: Bitcode,
-    failure: Error,
+pub const Result = struct {
+    arena: ArenaAllocator,
+    value: union(enum) {
+        success: Bitcode,
+        failure: Error,
+    },
+
+    pub fn deinit(res: Result) void {
+        res.arena.deinit();
+    }
 
     pub const Error = struct {
         bit_pos: usize,
@@ -20,6 +27,7 @@ pub const Result = union(enum) {
 
         pub const Kind = union(enum) {
             invalid_bitstream: bitstream.WalkError,
+            not_bitcode_file,
             magic,
             overflow,
             end_of_stream,
@@ -58,6 +66,7 @@ pub const Result = union(enum) {
             }
             switch (err.kind) {
                 .invalid_bitstream => |we| try we.render(writer),
+                .not_bitcode_file => try writer.print("too short to be a bitcode file", .{}),
                 .magic => try writer.print("magic header bytes do not identify stream as bitcode", .{}),
                 .overflow => try writer.print("integer overflowed while parsing", .{}),
                 .end_of_stream => try writer.print("unexpected end of bitstream", .{}),
@@ -79,49 +88,73 @@ pub const Result = union(enum) {
     };
 };
 
-pub fn parse(gpa: Allocator, src: []const u8) !Result {
+/// Free the result with res.deinit().
+pub fn parse(gpa: Allocator, src: []const u8) Allocator.Error!Result {
     var walker: bitstream.Walker(.{
         .last_known_block_id = @enumToInt(Bitcode.BlockId.last_known_block_id),
     }) = undefined;
     walker.init(gpa, src);
     defer walker.deinit();
 
-    const magic = try walker.readMagic();
+    var arena = ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+
+    if (src.len < 4) return Result{
+        .arena = arena,
+        .value = .{
+            .failure = .{
+                .bit_pos = 0,
+                .block_stack = &.{},
+                .kind = .not_bitcode_file,
+            },
+        },
+    };
+    const magic = walker.readMagic() catch unreachable;
     if (!std.mem.eql(u8, &magic, &Bitcode.magic)) {
-        return Result{ .failure = .{
-            .bit_pos = walker.r.pos,
-            .block_stack = &.{},
-            .kind = .magic,
-        } };
+        return Result{
+            .arena = arena,
+            .value = .{
+                .failure = .{
+                    .bit_pos = walker.r.pos,
+                    .block_stack = &.{},
+                    .kind = .magic,
+                },
+            },
+        };
     }
 
-    var p = parser(&walker, gpa);
-    errdefer p.deinit();
+    var p = parser(&walker, arena.allocator());
     p.parse() catch |err| return Result{
-        .failure = .{
-            .bit_pos = walker.r.pos,
-            .block_stack = b: {
-                const ids = try gpa.alloc(Bitcode.BlockId, p.walker.block_stack.items.len);
-                for (p.walker.block_stack.items) |item, i| {
-                    ids[i] = @intToEnum(Bitcode.BlockId, item.block_id);
-                }
-                break :b ids;
-            },
-            .kind = switch (err) {
-                error.EndOfStream => .end_of_stream,
-                error.InvalidBitstream => .{ .invalid_bitstream = walker.err.? },
-                // error.Overflow => .overflow,
-                error.InvalidBitcode => p.err.?,
-                else => return err,
+        .arena = arena,
+        .value = .{
+            .failure = .{
+                .bit_pos = walker.r.pos,
+                .block_stack = b: {
+                    const ids = try gpa.alloc(Bitcode.BlockId, p.walker.block_stack.items.len);
+                    for (p.walker.block_stack.items) |item, i| {
+                        ids[i] = @intToEnum(Bitcode.BlockId, item.block_id);
+                    }
+                    break :b ids;
+                },
+                .kind = switch (err) {
+                    error.EndOfStream => .end_of_stream,
+                    error.InvalidBitstream => .{ .invalid_bitstream = walker.err.? },
+                    // error.Overflow => .overflow,
+                    error.InvalidBitcode => p.err.?,
+                    else => |e| return e,
+                },
             },
         },
     };
 
-    return Result{ .success = p.bc };
+    return Result{
+        .arena = arena,
+        .value = .{ .success = p.bc },
+    };
 }
 
-fn parser(walker: anytype, gpa: Allocator) Parser(@TypeOf(walker)) {
-    return Parser(@TypeOf(walker)).init(gpa, walker);
+fn parser(walker: anytype, allocator: Allocator) Parser(@TypeOf(walker)) {
+    return Parser(@TypeOf(walker)).init(allocator, walker);
 }
 
 fn Parser(comptime Walker: type) type {
@@ -130,7 +163,7 @@ fn Parser(comptime Walker: type) type {
     }
 
     return struct {
-        arena: ArenaAllocator,
+        allocator: Allocator,
         walker: Walker,
         bc: Bitcode = .{},
         found: struct {
@@ -145,15 +178,11 @@ fn Parser(comptime Walker: type) type {
 
         const Self = @This();
 
-        fn init(gpa: Allocator, walker: Walker) Self {
+        fn init(allocator: Allocator, walker: Walker) Self {
             return Self{
-                .arena = ArenaAllocator.init(gpa),
+                .allocator = allocator,
                 .walker = walker,
             };
-        }
-
-        fn deinit(self: *Self) void {
-            self.arena.deinit();
         }
 
         fn parseError(self: *Self, err: Result.Error.Kind) error{InvalidBitcode}!noreturn {
@@ -204,7 +233,7 @@ fn Parser(comptime Walker: type) type {
                 .end_block => return,
                 .record => |code| switch (@intToEnum(Bitcode.Idendification.Code, code)) {
                     .IDENTIFICATION_CODE_STRING => {
-                        self.bc.identification.string = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        self.bc.identification.string = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                     },
                     .IDENTIFICATION_CODE_EPOCH => {
                         self.bc.identification.epoch = try self.expectOp(u0);
@@ -321,32 +350,32 @@ fn Parser(comptime Walker: type) type {
                         if (self.bc.module.triple.len != 0) {
                             return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_TRIPLE });
                         }
-                        self.bc.module.triple = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        self.bc.module.triple = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                     },
                     .MODULE_CODE_DATALAYOUT => {
                         if (self.bc.module.data_layout.len != 0) {
                             return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_DATALAYOUT });
                         }
-                        self.bc.module.data_layout = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        self.bc.module.data_layout = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                     },
                     .MODULE_CODE_SOURCE_FILENAME => {
                         if (self.bc.module.source_filename.len != 0) {
                             return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_SOURCE_FILENAME });
                         }
-                        self.bc.module.source_filename = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        self.bc.module.source_filename = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                     },
                     .MODULE_CODE_ASM => {
                         if (self.bc.module.@"asm".len != 0) {
                             return try self.parseError(.{ .module_duplicate_record = .MODULE_CODE_ASM });
                         }
-                        self.bc.module.@"asm" = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        self.bc.module.@"asm" = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                     },
                     .MODULE_CODE_SECTIONNAME => {
-                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                         try self.appendOne([]const u8, &self.bc.module.section_name, name);
                     },
                     .MODULE_CODE_DEPLIB => {
-                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                         try self.appendOne([]const u8, &self.bc.module.deplib, name);
                     },
                     .MODULE_CODE_ALIAS => {
@@ -367,7 +396,7 @@ fn Parser(comptime Walker: type) type {
                         try self.appendOne(A, &self.bc.module.aliases, a);
                     },
                     .MODULE_CODE_GCNAME => {
-                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        const name = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                         try self.appendOne([]const u8, &self.bc.module.gc_name, name);
                     },
                     .MODULE_CODE_COMDAT,
@@ -406,7 +435,7 @@ fn Parser(comptime Walker: type) type {
                             return try self.parseError(.type_duplicate_num_entry);
                         }
                         const count = try self.expectOp(usize);
-                        self.bc.module.type.entries = try self.arena.allocator().alloc(Bitcode.Module.Type.Entry, count);
+                        self.bc.module.type.entries = try self.allocator.alloc(Bitcode.Module.Type.Entry, count);
                     },
                     .TYPE_CODE_VOID => try self.appendTypeDefinition(.void),
                     .TYPE_CODE_FLOAT => try self.appendTypeDefinition(.float),
@@ -446,24 +475,24 @@ fn Parser(comptime Walker: type) type {
                         try self.appendTypeDefinition(.{ .@"struct" = .{
                             .name = null,
                             .is_packed = try self.expectOp(bool),
-                            .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
+                            .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.allocator)).?,
                         } });
                     },
                     .TYPE_CODE_STRUCT_NAME => {
-                        self.found.pending_type_name = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).?;
+                        self.found.pending_type_name = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).?;
                     },
                     .TYPE_CODE_STRUCT_NAMED => {
                         try self.appendTypeDefinitionNamed(.{ .@"struct" = .{
                             .name = undefined,
                             .is_packed = try self.expectOp(bool),
-                            .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
+                            .element_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.allocator)).?,
                         } });
                     },
                     .TYPE_CODE_FUNCTION => {
                         try self.appendTypeDefinition(.{ .function = .{
                             .is_vararg = try self.expectOp(bool),
                             .return_type_index = try self.expectOp(u32),
-                            .param_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.arena.allocator())).?,
+                            .param_type_indexes = (try self.walker.remainingRecordValuesAlloc(u32, self.allocator)).?,
                         } });
                     },
                     .TYPE_CODE_BFLOAT => try self.appendTypeDefinition(.bfloat),
@@ -504,7 +533,7 @@ fn Parser(comptime Walker: type) type {
         }
 
         fn parseParamAttrBlock(self: *Self, dst: *Bitcode.Module.ParamAttr) Error!void {
-            var indexes = ArrayList(u32).init(self.arena.allocator());
+            var indexes = ArrayList(u32).init(self.allocator);
             while (try self.walker.next()) |item| switch (item) {
                 .enter_block => return try self.parseError(.unexpected_block),
                 .end_block => break,
@@ -545,7 +574,7 @@ fn Parser(comptime Walker: type) type {
                 .attrs = undefined,
             };
 
-            var attrs = ArrayList(P.Entry.Attr).init(self.arena.allocator());
+            var attrs = ArrayList(P.Entry.Attr).init(self.allocator);
             while (try self.walker.nextRecordValue(u32)) |kind_code| {
                 const kind = @intToEnum(P.Entry.Attr.Kind, kind_code);
                 switch (kind) {
@@ -684,7 +713,7 @@ fn Parser(comptime Walker: type) type {
         }
 
         fn parseConstantsBlock(self: *Self, dst: *[]Bitcode.Constant) Error!void {
-            var constants = ArrayList(Bitcode.Constant).init(self.arena.allocator());
+            var constants = ArrayList(Bitcode.Constant).init(self.allocator);
             var next_type_index: ?u32 = null;
             while (try self.walker.next()) |item| switch (item) {
                 .enter_block => return try self.parseError(.unexpected_block),
@@ -708,12 +737,12 @@ fn Parser(comptime Walker: type) type {
                         .CST_CODE_INTEGER => .{ .int = try self.expectOp(u64) },
                         .CST_CODE_WIDE_INTEGER => val: {
                             // TODO
-                            break :val .{ .wide_int = (try self.walker.remainingRecordValuesAlloc(u64, self.arena.allocator())).? };
+                            break :val .{ .wide_int = (try self.walker.remainingRecordValuesAlloc(u64, self.allocator)).? };
                         },
                         .CST_CODE_FLOAT => .{ .float = try self.expectOp(u64) },
-                        .CST_CODE_AGGREGATE => .{ .aggregate = (try self.walker.remainingRecordValuesAlloc(u64, self.arena.allocator())).? },
-                        .CST_CODE_STRING => .{ .string = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).? },
-                        .CST_CODE_CSTRING => .{ .cstring = (try self.walker.remainingRecordValuesAlloc(u8, self.arena.allocator())).? },
+                        .CST_CODE_AGGREGATE => .{ .aggregate = (try self.walker.remainingRecordValuesAlloc(u64, self.allocator)).? },
+                        .CST_CODE_STRING => .{ .string = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).? },
+                        .CST_CODE_CSTRING => .{ .cstring = (try self.walker.remainingRecordValuesAlloc(u8, self.allocator)).? },
                         .CST_CODE_CE_BINOP,
                         .CST_CODE_CE_CAST,
                         .CST_CODE_CE_GEP,
@@ -784,7 +813,7 @@ fn Parser(comptime Walker: type) type {
         }
 
         fn parseStringOpZ(self: *Self) Error![]const u8 {
-            var str = ArrayList(u8).init(self.arena.allocator());
+            var str = ArrayList(u8).init(self.allocator);
             while (try self.walker.nextRecordValue(u8)) |char| {
                 if (char == 0) break;
                 try str.append(char);
@@ -828,7 +857,7 @@ fn Parser(comptime Walker: type) type {
 
         fn appendOne(self: *Self, comptime T: type, slice: *[]T, val: T) Error!void {
             const len = slice.len;
-            slice.* = try self.arena.allocator().realloc(slice.*, len + 1);
+            slice.* = try self.allocator.realloc(slice.*, len + 1);
             slice.*[len] = val;
         }
     };

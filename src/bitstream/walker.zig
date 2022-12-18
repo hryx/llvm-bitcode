@@ -182,7 +182,7 @@ pub fn Walker(comptime opts: WalkerOptions) type {
             return error.InvalidBitstream;
         }
 
-        pub fn readMagic(self: *Self) ReaderError![4]u8 {
+        pub fn readMagic(self: *Self) error{EndOfStream}![4]u8 {
             assert(self.state == .start); // You must only call readMagic() once
             self.state = .block;
             return self.r.readMagic();

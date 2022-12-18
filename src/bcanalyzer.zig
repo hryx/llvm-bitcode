@@ -12,6 +12,7 @@ pub fn main() !void {
     var stderr = std.io.getStdErr().writer();
 
     const args = try std.process.argsAlloc(arena.allocator());
+
     var file_name: ?[]const u8 = null;
     var dump = false;
 
@@ -36,24 +37,17 @@ pub fn main() !void {
         std.os.exit(1);
     }
 
-    const f = try std.fs.cwd().openFile(file_name.?, .{});
-    defer f.close();
+    const src = try std.fs.cwd().readFileAllocOptions(arena.allocator(), file_name.?, 20_000_000, 2_000_000, 4, null);
 
-    var parser = llvm.parser(gpa.allocator(), f.reader());
-    defer parser.deinit();
-    const res = try parser.parse();
-    switch (res) {
+    const res = try llvm.parser.parse(gpa.allocator(), src);
+    defer res.deinit();
+    switch (res.value) {
         .success => |bc| {
             if (dump) dumpBitcode(std.io.getStdOut().writer(), bc);
         },
         .failure => |err| {
-            const byte = err.pos / 8;
-            const bit_off = err.pos % 8;
-            stderr.print(
-                "bit {} (0x{x:0>4}+{}): {s}\n",
-                .{ err.pos, byte, bit_off, err.msg },
-            ) catch unreachable;
-            stderr.print("File contains invalid LLVM bitcode\n", .{}) catch unreachable;
+            err.render(stderr) catch unreachable;
+            stderr.print("\nFile contains invalid LLVM bitcode\n", .{}) catch unreachable;
             std.os.exit(1);
         },
     }

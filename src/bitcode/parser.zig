@@ -139,7 +139,7 @@ pub fn parse(gpa: Allocator, src: []const u8) Allocator.Error!Result {
                 .kind = switch (err) {
                     error.EndOfStream => .end_of_stream,
                     error.InvalidBitstream => .{ .invalid_bitstream = walker.err.? },
-                    // error.Overflow => .overflow,
+                    error.Overflow => .overflow,
                     error.InvalidBitcode => p.err.?,
                     else => |e| return e,
                 },

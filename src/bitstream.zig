@@ -5,11 +5,11 @@ const io = std.io;
 const assert = std.debug.assert;
 
 pub const codes = @import("bitstream/codes.zig");
-const w = @import("bitstream/walker.zig");
-pub const walker = w.walker;
-pub const Walker = w.Walker;
-pub const WalkerOptions = w.WalkerOptions;
-pub const WalkError = w.WalkError;
+const wlk = @import("bitstream/walker.zig");
+pub const walker = wlk.walker;
+pub const Walker = wlk.Walker;
+pub const WalkerOptions = wlk.WalkerOptions;
+pub const WalkError = wlk.WalkError;
 
 pub fn decodeChar6(c: u6) u8 {
     return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[c];
@@ -65,7 +65,7 @@ pub fn Reader(comptime ReaderType: type) type {
         const Self = @This();
         const BitReaderType = io.BitReader(.Little, ReaderType);
         // pub const Error = BitstreamError || BitReaderType.Error;
-        pub const Error = error{ EndOfStream, InvalidBitstream };
+        pub const Error = BitstreamError;
 
         pub fn init(unberlying_reader: ReaderType) Self {
             return Self{
@@ -84,7 +84,7 @@ pub fn Reader(comptime ReaderType: type) type {
             assert(t_info.bits <= 64 and t_info.signedness == .unsigned);
             assert(width > 0);
 
-            const Chunk = u32;
+            const Chunk = u64;
             const ShiftT = std.math.Log2Int(Chunk);
             const val_bits = @intCast(ShiftT, width - 1);
 
@@ -162,7 +162,7 @@ pub fn Reader(comptime ReaderType: type) type {
         /// - If this returns .array, there is exactly one more operand following it,
         ///   and the final operand is a fixed, vbr, or char6.
         /// - If this returns .blob, there are zero more operands.
-        pub fn readAbbrevOp(self: *Self) error{ EndOfStream, InvalidBitstream }!AbbrevOp {
+        pub fn readAbbrevOp(self: *Self) Error!AbbrevOp {
             const is_literal = try self.readIntAuto(u1) == 1;
             if (is_literal) {
                 const value = try self.readVbr(u64, 8);
@@ -180,7 +180,7 @@ pub fn Reader(comptime ReaderType: type) type {
             }
         }
 
-        pub fn readSubBlockHeader(self: *Self) error{EndOfStream}!BlockHeader {
+        pub fn readSubBlockHeader(self: *Self) Error!BlockHeader {
             const block_id = try self.readVbr(u32, 8);
             const abbrev_width = try self.readVbr(u5, 4);
             try self.alignToWord();
@@ -247,6 +247,22 @@ test "vbr" {
     r = reader(fbs.reader());
     try testing.expectEqual(@as(u64, 17214), try r.readVbr(u64, 9));
     try testing.expectEqual(@as(usize, 18), r.pos);
+}
+
+test "vbr big number" {
+    var buf: [64]u8 = undefined;
+    var fbs = io.fixedBufferStream(&buf);
+    var w = io.bitWriter(.Little, fbs.writer());
+    try w.writeBits(@as(u24, 0xaaaaad), 24);
+    try w.writeBits(@as(u1, 1), 1);
+    try w.writeBits(@as(u24, 0xaaaaaa), 24);
+    try w.writeBits(@as(u1, 1), 1);
+    try w.writeBits(@as(u24, 0xaaaa), 24);
+    try w.writeBits(@as(u1, 0), 1);
+    try w.flushBits();
+    fbs.reset();
+    var r = reader(fbs.reader());
+    try testing.expectEqual(@as(u64, 0xaaaaaaaaaaaaaaad), try r.readVbr(u64, 25));
 }
 
 test "skip bits" {

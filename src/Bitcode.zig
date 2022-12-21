@@ -427,6 +427,8 @@ pub const Module = struct {
                         elementtype = 77,
                         disable_sanitizer_instrumentation = 78,
                         nosanitize_bounds = 79,
+
+                        _,
                     };
                 };
             };
@@ -556,6 +558,7 @@ pub const Module = struct {
         personality_fn_index: ?u32,
         preemption_specifier: GlobalVar.PreemptionSpecifier,
         constants: []Constant = &.{},
+        body: Body = .{},
 
         pub const CallingConv = enum(u7) {
             ccc = 0,
@@ -577,6 +580,74 @@ pub const Module = struct {
             arm_aapcs_vfpcc = 68,
 
             pub const jsonStringify = defaultEnumJsonStringify(@This());
+        };
+
+        pub const Body = struct {
+            basic_blocks: []BasicBlock = &.{},
+
+            pub const BasicBlock = struct {
+                todo: bool = false,
+            };
+        };
+
+        pub const Code = enum(u32) {
+            FUNC_CODE_DECLAREBLOCKS = 1,
+            FUNC_CODE_INST_BINOP,
+            FUNC_CODE_INST_CAST,
+            FUNC_CODE_INST_GEP_OLD,
+            FUNC_CODE_INST_SELECT,
+            FUNC_CODE_INST_EXTRACTELT,
+            FUNC_CODE_INST_INSERTELT,
+            FUNC_CODE_INST_SHUFFLEVEC,
+            FUNC_CODE_INST_CMP,
+            FUNC_CODE_INST_RET0,
+            FUNC_CODE_INST_BR1,
+            FUNC_CODE_INST_SWITCH2,
+            FUNC_CODE_INST_INVOKE3,
+
+            FUNC_CODE_INST_UNREACHABLE = 15,
+            FUNC_CODE_INST_PHI,
+
+            FUNC_CODE_INST_ALLOCA = 19,
+            FUNC_CODE_INST_LOAD,
+
+            FUNC_CODE_INST_VAARG = 23,
+            FUNC_CODE_INST_STORE_OLD,
+
+            FUNC_CODE_INST_EXTRACTVAL = 26,
+            FUNC_CODE_INST_INSERTVAL,
+            FUNC_CODE_INST_CMP2,
+            FUNC_CODE_INST_VSELECT,
+            FUNC_CODE_INST_INBOUNDS_GEP_OLD,
+            FUNC_CODE_INST_INDIRECTBR,
+
+            FUNC_CODE_DEBUG_LOC_AGAIN = 33,
+            FUNC_CODE_INST_CALL,
+            FUNC_CODE_DEBUG_LOC,
+            FUNC_CODE_INST_FENCE,
+            FUNC_CODE_INST_CMPXCHG_OLD,
+            FUNC_CODE_INST_ATOMICRMW_OLD,
+            FUNC_CODE_INST_RESUME,
+            FUNC_CODE_INST_LANDINGPAD_OLD,
+            FUNC_CODE_INST_LOADATOMIC,
+            FUNC_CODE_INST_STOREATOMIC_OLD,
+            FUNC_CODE_INST_GEP,
+            FUNC_CODE_INST_STORE,
+            FUNC_CODE_INST_STOREATOMIC,
+            FUNC_CODE_INST_CMPXCHG,
+            FUNC_CODE_INST_LANDINGPAD,
+            FUNC_CODE_INST_CLEANUPRET,
+            FUNC_CODE_INST_CATCHRET,
+            FUNC_CODE_INST_CATCHPAD,
+            FUNC_CODE_INST_CLEANUPPAD,
+            FUNC_CODE_INST_CATCHSWITCH,
+            FUNC_CODE_OPERAND_BUNDLE,
+            FUNC_CODE_INST_UNOP,
+            FUNC_CODE_INST_CALLBR,
+            FUNC_CODE_INST_FREEZE,
+            FUNC_CODE_INST_ATOMICRMW,
+            FUNC_CODE_BLOCKADDR_USERS,
+            _,
         };
     };
 
@@ -669,6 +740,58 @@ pub const Constant = struct {
         CST_CODE_NO_CFI_VALUE,
         CST_CODE_INLINEASM,
         _,
+    };
+};
+
+pub const Metadata = struct {
+    pub const Code = enum(u32) {
+        METADATA_STRING_OLD = 1, // MDSTRING:      [values]
+        METADATA_VALUE = 2, // VALUE:         [type num, value num]
+        METADATA_NODE = 3, // NODE:          [n x md num]
+        METADATA_NAME = 4, // STRING:        [values]
+        METADATA_DISTINCT_NODE = 5, // DISTINCT_NODE: [n x md num]
+        METADATA_KIND = 6, // [n x [id, name]]
+        METADATA_LOCATION = 7, // [distinct, line, col, scope, inlined-at?]
+        METADATA_OLD_NODE = 8, // OLD_NODE:      [n x (type num, value num)]
+        METADATA_OLD_FN_NODE = 9, // OLD_FN_NODE:   [n x (type num, value num)]
+        METADATA_NAMED_NODE = 10, // NAMED_NODE:    [n x mdnodes]
+        METADATA_ATTACHMENT = 11, // [m x [value, [n x [id, mdnode]]]
+        METADATA_GENERIC_DEBUG = 12, // [distinct, tag, vers, header, n x md num]
+        METADATA_SUBRANGE = 13, // [distinct, count, lo]
+        METADATA_ENUMERATOR = 14, // [isUnsigned|distinct, value, name]
+        METADATA_BASIC_TYPE = 15, // [distinct, tag, name, size, align, enc]
+        METADATA_FILE = 16, // [distinct, filename, directory, checksumkind, checksum]
+        METADATA_DERIVED_TYPE = 17, // [distinct, ...]
+        METADATA_COMPOSITE_TYPE = 18, // [distinct, ...]
+        METADATA_SUBROUTINE_TYPE = 19, // [distinct, flags, types, cc]
+        METADATA_COMPILE_UNIT = 20, // [distinct, ...]
+        METADATA_SUBPROGRAM = 21, // [distinct, ...]
+        METADATA_LEXICAL_BLOCK = 22, // [distinct, scope, file, line, column]
+        METADATA_LEXICAL_BLOCK_FILE = 23, //[distinct, scope, file, discriminator]
+        METADATA_NAMESPACE = 24, // [distinct, scope, file, name, line, exportSymbols]
+        METADATA_TEMPLATE_TYPE = 25, // [distinct, scope, name, type, ...]
+        METADATA_TEMPLATE_VALUE = 26, // [distinct, scope, name, type, value, ...]
+        METADATA_GLOBAL_VAR = 27, // [distinct, ...]
+        METADATA_LOCAL_VAR = 28, // [distinct, ...]
+        METADATA_EXPRESSION = 29, // [distinct, n x element]
+        METADATA_OBJC_PROPERTY = 30, // [distinct, name, file, line, ...]
+        METADATA_IMPORTED_ENTITY = 31, // [distinct, tag, scope, entity, line, name]
+        METADATA_MODULE = 32, // [distinct, scope, name, ...]
+        METADATA_MACRO = 33, // [distinct, macinfo, line, name, value]
+        METADATA_MACRO_FILE = 34, // [distinct, macinfo, line, file, ...]
+        METADATA_STRINGS = 35, // [count, offset] blob([lengths][chars])
+        METADATA_GLOBAL_DECL_ATTACHMENT = 36, // [valueid, n x [id, mdnode]]
+        METADATA_GLOBAL_VAR_EXPR = 37, // [distinct, var, expr]
+        METADATA_INDEX_OFFSET = 38, // [offset]
+        METADATA_INDEX = 39, // [bitpos]
+        METADATA_LABEL = 40, // [distinct, scope, name, file, line]
+        METADATA_STRING_TYPE = 41, // [distinct, name, size, align,...]
+        // Codes 42 and 43 are reserved for support for Fortran array specific debug
+        // info.
+        METADATA_COMMON_BLOCK = 44, // [distinct, scope, name, variable,...]
+        METADATA_GENERIC_SUBRANGE = 45, // [distinct, count, lo, up, stride]
+        METADATA_ARG_LIST = 46, // [n x [type num, value num]]
+        METADATA_ASSIGN_ID = 47, // [distinct, ...]};
     };
 };
 

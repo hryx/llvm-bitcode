@@ -26,6 +26,11 @@ pub fn encodeChar6(c: u8) ?u6 {
     };
 }
 
+pub fn isValidChar6String(str: []const u8) bool {
+    for (str) |c| if (encodeChar6(c) == null) return false;
+    return true;
+}
+
 pub const BitstreamError = error{
     /// Unexpectedly reached the end of the Reader stream when expecting more bits.
     EndOfStream,
@@ -55,6 +60,10 @@ pub const AbbrevOp = union(enum) {
     blob,
     array,
 };
+
+test {
+    _ = @import("bitstream/writer.zig");
+}
 
 pub fn Reader(comptime ReaderType: type) type {
     return struct {

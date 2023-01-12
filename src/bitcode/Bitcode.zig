@@ -4,7 +4,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const bitstream = @import("bitstream.zig");
+const bitstream = @import("../bitstream.zig");
 const codes = bitstream.codes;
 
 /// Magic header byte that always appears at the start of LLVM bitcode.

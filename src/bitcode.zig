@@ -9,7 +9,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const bitstream = @import("bitstream.zig");
 const codes = bitstream.codes;
 
-pub const Bitcode = @import("Bitcode.zig");
+pub const Bitcode = @import("bitcode/Bitcode.zig");
 pub const parser = @import("bitcode/parser.zig");
 
 test {

@@ -7,7 +7,7 @@ const ArrayList = std.ArrayList;
 const bitstream = @import("../bitstream.zig");
 const codes = bitstream.codes;
 
-const Bitcode = @import("../Bitcode.zig");
+const Bitcode = @import("Bitcode.zig");
 
 pub const Result = struct {
     arena: ArenaAllocator,

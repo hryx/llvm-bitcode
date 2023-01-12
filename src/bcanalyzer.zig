@@ -1,7 +1,7 @@
 const std = @import("std");
 const bitstream = @import("bitstream.zig");
-const llvm = @import("llvm_bitcode.zig");
-const Bitcode = llvm.Bitcode;
+const bitcode = @import("bitcode.zig");
+const Bitcode = bitcode.Bitcode;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -39,7 +39,7 @@ pub fn main() !void {
 
     const src = try std.fs.cwd().readFileAllocOptions(arena.allocator(), file_name.?, 20_000_000, 2_000_000, 4, null);
 
-    const res = try llvm.parser.parse(gpa.allocator(), src);
+    const res = try bitcode.parser.parse(gpa.allocator(), src);
     defer res.deinit();
     switch (res.value) {
         .success => |bc| {
